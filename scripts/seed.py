@@ -104,15 +104,35 @@ def link_supplier_account(session, supplier_user_id: str) -> str | None:
     """Point the supplier account at a real supplier.
 
     A supplier sees only their own purchase orders and catalogue, and the RLS
-    policy decides that by comparing the row's supplier_id to the claim in the
-    token. Without this link the external account would correctly see nothing,
-    which makes for a dull demo.
+    policy decides that by comparing the row's supplier_code to the claim in the
+    token. Without this link the external account would authenticate correctly
+    and then see nothing, which is right but makes for a dull demo.
     """
-    supplier_id = session.execute(
-        text("select id from public.suppliers order by supplier_code limit 1")
-    ).scalar()
-    if supplier_id is None:
+    # Pick the supplier with the most purchase orders, so the external demo
+    # account lands on one that actually has data to show. Linking to an
+    # arbitrary supplier can land on one with no orders, which makes a working
+    # policy look like a broken page.
+    row = session.execute(
+        text(
+            """
+            select s.id, s.supplier_code
+              from public.suppliers s
+              left join public.purchase_orders po on po.supplier_code = s.supplier_code
+             group by s.id, s.supplier_code
+             order by count(po.id) desc, s.supplier_code
+             limit 1
+            """
+        )
+    ).first()
+    if row is None:
+        # No target data yet. Fall back to any supplier so the account still
+        # links and the FK holds.
+        row = session.execute(
+            text("select id, supplier_code from public.suppliers order by supplier_code limit 1")
+        ).first()
+    if row is None:
         return None
+    supplier_id = row[0]
     session.execute(
         text("update public.app_users set supplier_id = :sid where id = cast(:uid as uuid)"),
         {"sid": supplier_id, "uid": supplier_user_id},

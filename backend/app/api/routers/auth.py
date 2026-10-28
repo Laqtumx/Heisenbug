@@ -65,12 +65,23 @@ def login(payload: LoginRequest, session: Session = Depends(db)) -> TokenRespons
             status_code=status.HTTP_403_FORBIDDEN, detail="This account is disabled"
         )
 
+    # A supplier's own rows are matched by supplier_code inside the RLS policy,
+    # so the code has to travel in the token. Without it the external account
+    # would authenticate correctly and then see nothing.
+    supplier_code = None
+    if row["supplier_id"] is not None:
+        supplier_code = session.execute(
+            text("select supplier_code from public.suppliers where id = :sid"),
+            {"sid": row["supplier_id"]},
+        ).scalar()
+
     token = auth.create_access_token(
         user_id=row["id"],
         email=row["email"],
         role=row["role"],
         full_name=row["full_name"],
         supplier_id=row["supplier_id"],
+        supplier_code=supplier_code,
     )
     session.execute(
         text("update public.app_users set last_login_at = now() where id = :id"),
@@ -90,7 +101,7 @@ def login(payload: LoginRequest, session: Session = Depends(db)) -> TokenRespons
     return TokenResponse(
         access_token=token,
         expires_in=settings.access_token_ttl_minutes * 60,
-        user=UserOut(**row_to_dict(row)),
+        user=UserOut(**row_to_dict(row), supplier_code=supplier_code),
     )
 
 
@@ -103,6 +114,7 @@ def me(user: CurrentUser = Depends(get_current_user)) -> MeResponse:
             full_name=user.full_name,
             role=user.role,
             supplier_id=user.supplier_id,
+            supplier_code=user.supplier_code,
         ),
         permissions=sorted(user.permissions),
         capabilities=_capabilities(user),

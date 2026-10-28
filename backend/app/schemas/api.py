@@ -13,12 +13,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
-from typing import Any, Literal
-
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
-from typing import Annotated
+from decimal import Decimal
+from typing import Annotated, Any, Literal
 
 from email_validator import EmailNotValidError, validate_email
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 
 def _validate_email(value: str) -> str:
@@ -74,6 +73,7 @@ class UserOut(BaseModel):
     full_name: str
     role: Role
     supplier_id: uuid.UUID | None = None
+    supplier_code: str | None = None
     is_active: bool = True
 
 
@@ -321,6 +321,60 @@ class InventoryInsightOut(BaseModel):
     total_items: int
     at_risk: int
     below_reorder: list[StockOut] = Field(default_factory=list)
+
+
+class SupplierPurchaseOrderOut(BaseModel):
+    po_number: str
+    supplier_code: str
+    order_date: date | None = None
+    currency: str | None = None
+    total_amount: Decimal | None = None
+    status: str | None = None
+
+
+class SupplierCatalogOut(BaseModel):
+    supplier_code: str
+    item_code: str
+    supplier_sku: str | None = None
+    unit_price: Decimal | None = None
+    currency: str | None = None
+    lead_time_days: int | None = None
+    min_order_qty: Decimal | None = None
+    is_active: bool | None = None
+
+
+class SupplierPortalOut(BaseModel):
+    supplier_code: str
+    purchase_orders: list[SupplierPurchaseOrderOut] = Field(default_factory=list)
+    catalogue: list[SupplierCatalogOut] = Field(default_factory=list)
+    purchase_order_count: int
+    total_order_value: float
+    enforced_by: str
+
+
+class RlsProbeOut(BaseModel):
+    """What one role could read from one table.
+
+    ``visible`` false with a ``denial_reason`` means the database refused the
+    query rather than returning an empty set; both are a denial, and the reason
+    says which mechanism did the work.
+    """
+
+    table: str
+    area: str
+    description: str
+    visible: bool
+    granted: bool
+    row_count: int | None = None
+    total_rows: int = 0
+    denied_rows: int = 0
+    denial_reason: str | None = None
+
+
+class RlsMatrixOut(BaseModel):
+    roles: dict[str, list[RlsProbeOut]]
+    summary: dict[str, list[str]]
+    enforced_by: str
 
 
 TokenResponse.model_rebuild()

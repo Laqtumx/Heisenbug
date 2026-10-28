@@ -48,6 +48,30 @@ def _accounts():
                 ),
                 {"email": email, "name": f"Pytest {role}", "pw": password_hash, "role": role},
             )
+
+        # Link the external account to a supplier that actually has purchase
+        # orders. The RLS policy matches on supplier_code, so an unlinked
+        # account is correctly shown nothing, which would make the isolation
+        # test vacuous rather than proving isolation.
+        supplier = session.execute(
+            text(
+                """
+                select s.id
+                  from public.suppliers s
+                  left join public.purchase_orders po on po.supplier_code = s.supplier_code
+                 group by s.id
+                 order by count(po.id) desc, s.supplier_code
+                 limit 1
+                """
+            )
+        ).scalar()
+        if supplier is not None:
+            session.execute(
+                text(
+                    "update public.app_users set supplier_id = :sid where email = :email"
+                ),
+                {"sid": supplier, "email": ACCOUNTS["supplier"]},
+            )
     yield
     with service_session() as session:
         session.execute(
@@ -462,3 +486,80 @@ def test_responses_carry_a_request_id(client: TestClient) -> None:
 def test_a_supplied_request_id_is_echoed_back(client: TestClient) -> None:
     response = client.get("/health", headers={"x-request-id": "trace-me-123"})
     assert response.headers["x-request-id"] == "trace-me-123"
+
+
+# ------------------------------------------------------------------ RLS -----
+
+
+def test_rls_matrix_shows_the_matrix_enforced_by_postgres(client: TestClient) -> None:
+    """The whole point: the database, not the API, decides what each role sees."""
+    admin = _headers(client, "admin")
+    body = client.get("/api/v1/security/rls-matrix", headers=admin).json()
+    assert "postgres" in body["enforced_by"].lower()
+    assert set(body["roles"]) == {
+        "admin",
+        "migration_engineer",
+        "finance_controller",
+        "inventory_manager",
+        "supplier",
+    }
+
+
+def test_rls_hides_finance_from_the_migration_engineer(client: TestClient) -> None:
+    admin = _headers(client, "admin")
+    body = client.get("/api/v1/security/rls-matrix", headers=admin).json()
+    engineer = {p["table"]: p for p in body["roles"]["migration_engineer"]}
+    # The table has rows, but the policy returns none of them.
+    assert engineer["invoices"]["total_rows"] > 0
+    assert engineer["invoices"]["visible"] is False
+    assert engineer["invoices"]["row_count"] == 0
+    assert engineer["invoices"]["denied_rows"] == engineer["invoices"]["total_rows"]
+
+
+def test_rls_lets_the_finance_controller_read_finance(client: TestClient) -> None:
+    admin = _headers(client, "admin")
+    body = client.get("/api/v1/security/rls-matrix", headers=admin).json()
+    finance = {p["table"]: p for p in body["roles"]["finance_controller"]}
+    assert finance["invoices"]["visible"] is True
+    assert finance["invoices"]["row_count"] == finance["invoices"]["total_rows"]
+
+
+def test_rls_denies_the_supplier_the_audit_log(client: TestClient) -> None:
+    admin = _headers(client, "admin")
+    body = client.get("/api/v1/security/rls-matrix", headers=admin).json()
+    supplier = {p["table"]: p for p in body["roles"]["supplier"]}
+    assert supplier["audit_log"]["visible"] is False
+    assert supplier["invoices"]["visible"] is False
+
+
+def test_the_supplier_sees_only_their_own_purchase_orders(client: TestClient) -> None:
+    """The load-bearing security test: a supplier cannot see another's orders."""
+    headers = _headers(client, "supplier")
+    response = client.get("/api/v1/supplier/purchase-orders", headers=headers)
+    assert response.status_code == 200
+    orders = response.json()
+    if not orders:
+        pytest.skip("the supplier demo account has no purchase orders in this database")
+    codes = {order["supplier_code"] for order in orders}
+    assert len(codes) == 1, f"a supplier saw more than one supplier's orders: {codes}"
+
+    portal = client.get("/api/v1/supplier/portal", headers=headers).json()
+    assert portal["purchase_order_count"] == len(orders)
+    assert all(order["supplier_code"] == portal["supplier_code"] for order in orders)
+
+
+def test_the_supplier_portal_is_closed_to_internal_roles(client: TestClient, engineer) -> None:
+    """An internal user reading the portal would see every supplier's orders."""
+    assert client.get("/api/v1/supplier/portal", headers=engineer).status_code == 403
+
+
+def test_the_supplier_cannot_reach_finance_surfaces(client: TestClient) -> None:
+    headers = _headers(client, "supplier")
+    assert client.get("/api/v1/audit", headers=headers).status_code == 403
+    assert client.get("/api/v1/security/rls-matrix", headers=headers).status_code == 403
+    assert client.get("/api/v1/findings", headers=headers).status_code == 403
+
+
+def test_rls_matrix_needs_audit_access(client: TestClient) -> None:
+    headers = _headers(client, "inventory_manager")
+    assert client.get("/api/v1/security/rls-matrix", headers=headers).status_code == 403

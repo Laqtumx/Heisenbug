@@ -30,6 +30,8 @@ from app.api.routers import batches as batches_router
 from app.api.routers import findings as findings_router
 from app.api.routers import inventory as inventory_router
 from app.api.routers import reports as reports_router
+from app.api.routers import security as security_router
+from app.api.routers import supplier as supplier_router
 from app.api.routers import review as review_router
 from app.config import settings
 from app.utils.logging import configure_logging, request_id_var
@@ -189,3 +191,5 @@ app.include_router(review_router.router, prefix=API)
 app.include_router(reports_router.router, prefix=API)
 app.include_router(audit_router.router, prefix=API)
 app.include_router(inventory_router.router, prefix=API)
+app.include_router(security_router.router, prefix=API)
+app.include_router(supplier_router.router, prefix=API)
