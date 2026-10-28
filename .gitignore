@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+
+# Env and secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Runtime data
+var/
+*.log
+.data/
+
+# Build artefacts
+dist/
+build/
+coverage/
+.vercel
+
+# OS
+.DS_Store
+Thumbs.db
