@@ -756,15 +756,29 @@ class DemoDataGenerator:
         return pd.DataFrame(rows)
 
     def build_inventory_stock(self) -> pd.DataFrame:
+        """One stock row per (item, warehouse).
+
+        The target table has a unique key on (item_code, warehouse_code), so a
+        random item per row produces collisions and the load fails on a
+        constraint the dry run should have caught. Drawing from the full set of
+        item/warehouse pairs makes the data valid by construction, which keeps
+        the unlabelled defects at zero.
+        """
         n = self.counts.inventory_stock
-        item_codes = [f"ITM-{i + 1:06d}" for i in range(self.counts.items)]
+        warehouses = ["WH01", "WH02", "WH03"]
+        pairs = [
+            (f"ITM-{i + 1:06d}", wh)
+            for i in range(self.counts.items)
+            for wh in warehouses
+        ]
+        chosen = self.rng.sample(pairs, min(n, len(pairs)))
         rows = []
-        for i in range(n):
+        for i, (item_code, warehouse_code) in enumerate(chosen):
             rows.append(
                 {
                     "record_id": _record_id("STK", i + 1),
-                    "item_code": self.rng.choice(item_codes),
-                    "warehouse_code": self.rng.choice(["WH01", "WH02", "WH03"]),
+                    "item_code": item_code,
+                    "warehouse_code": warehouse_code,
                     "uom_code": self.rng.choice(CANONICAL_UOM),
                     "qty_on_hand": float(self.rng.randint(1, 5000)),
                 }
@@ -772,16 +786,21 @@ class DemoDataGenerator:
         return pd.DataFrame(rows)
 
     def build_supplier_catalog(self) -> pd.DataFrame:
+        """One catalogue row per (supplier, item), matching the target's unique key."""
         n = self.counts.supplier_catalog
-        supplier_codes = [f"SUP-{i + 1:05d}" for i in range(self.counts.suppliers)]
-        item_codes = [f"ITM-{i + 1:06d}" for i in range(self.counts.items)]
+        pairs = [
+            (f"SUP-{i + 1:05d}", f"ITM-{j + 1:06d}")
+            for i in range(self.counts.suppliers)
+            for j in range(self.counts.items)
+        ]
+        chosen = self.rng.sample(pairs, min(n, len(pairs)))
         rows = []
-        for i in range(n):
+        for i, (supplier_code, item_code) in enumerate(chosen):
             rows.append(
                 {
                     "record_id": _record_id("SCA", i + 1),
-                    "supplier_code": self.rng.choice(supplier_codes),
-                    "item_code": self.rng.choice(item_codes),
+                    "supplier_code": supplier_code,
+                    "item_code": item_code,
                     "supplier_sku": f"SKU-{i + 1:06d}",
                     "unit_price": round(self.rng.uniform(5, 6000), 2),
                     "currency": "INR",
