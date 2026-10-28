@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import logging
 import random
+import string
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
@@ -27,6 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from app.config import settings
 from app.pipeline.entities import ENTITIES, ENTITIES_BY_NAME, EntitySpec
 
 logger = logging.getLogger(__name__)
@@ -145,11 +147,30 @@ _NAME_PREFIX = [
     "Vandelay", "Stark", "Wayne", "Wonka", "Cyberdyne", "Massive", "Aperture",
     "Tyrell", "Oscorp", "Pied Piper", "Hooli", "Dunder", "Prestige",
 ]
+# A second name word keeps the generated pool far larger than the record count,
+# so a clean dataset contains no accidental near-duplicate names. Without it,
+# random generation alone would create thousands of fuzzy matches that are not
+# injected defects and would make the detection rate unmeasurable.
+_NAME_BRAND = [
+    "Alpha", "Beta", "Gamma", "Delta", "Omega", "Sigma", "Vertex", "Prime",
+    "Nova", "Orion", "Atlas", "Titan", "Zenith", "Apex", "Nexus", "Quantum",
+    "Falcon", "Griffin", "Phoenix", "Dragon", "Cobalt", "Onyx", "Jade", "Amber",
+    "Crystal", "Granite", "Basalt", "Copper", "Bronze", "Silver", "Crimson",
+    "Indigo", "Sapphire", "Emerald", "Topaz", "Opal", "Quartz", "Cedar", "Maple",
+    "Birch", "Willow", "Aspen", "Larch", "Alder", "Hazel", "Rowan", "Yew",
+    "Borealis", "Meridian", "Solstice", "Equinox", "Horizon", "Vantage", "Crest",
+    "Summit", "Ridge", "Valley", "Harbour", "Anchor", "Compass", "Beacon",
+]
 _NAME_SUFFIX = [
     "Industries", "Traders", "Enterprises", "Solutions", "Logistics", "Textiles",
     "Engineering", "Polymers", "Metals", "Electricals", "Packaging", "Chemicals",
 ]
-_LEGAL_FORM = ["Pvt Ltd", "Ltd", "LLP", "Inc", "and Sons", "Industries"]
+# Every legal form is already title case, so the title-case rule does not flag
+# clean records. "and Sons" was removed for that reason, and "Industries" is
+# absent because it also appears in the suffix pool: a name ending in
+# "Industries Industries" becomes "Inds Inds" under the abbreviation defect,
+# which drops the similarity score below the fuzzy threshold.
+_LEGAL_FORM = ["Pvt Ltd", "Ltd", "LLP", "Inc", "Sons", "Private Limited"]
 _CITIES = [
     ("Mumbai", "Maharashtra", "400001"),
     ("Pune", "Maharashtra", "411001"),
@@ -172,18 +193,33 @@ _ITEM_WORDS = [
 ]
 _ITEM_QUALIFIERS = ["Heavy Duty", "Standard", "Industrial", "Precision", "Compact", "Marine"]
 
-# Canonical units, then the messy variants a legacy export actually contains.
+# Canonical units. The messy variants the generator injects are read from the
+# MD010 rule configuration rather than duplicated here, so the defects the
+# generator creates and the defects the rule looks for cannot drift apart.
 CANONICAL_UOM = ["KG", "PCS", "LTR", "BOX", "MTR", "SET", "PKT", "TON"]
-UOM_VARIANTS: dict[str, list[str]] = {
-    "KG": ["Kgs", "kgs", "Kg.", " KG", "K.G."],
-    "PCS": ["Pcs", "pcs", "Pcs.", " PC", "Nos", "nos"],
-    "LTR": ["Ltr", "ltr", "Litre", " Lit", "LTRS"],
-    "BOX": ["Box", "box", "Bx", " BOX", "Boxes"],
-    "MTR": ["Mtr", "mtr", "Meter", " MTR", "Meters"],
-    "SET": ["Set", "set", "Set.", " SET", "Sets"],
-    "PKT": ["Pkt", "pkt", "Packet", " PKT", "Packets"],
-    "TON": ["Ton", "ton", "Tonne", " TON", "Tonnes"],
-}
+
+
+def uom_variants() -> dict[str, list[str]]:
+    """Aliases from the MD010 rule, filtered to ones the rule can detect.
+
+    An alias that differs from its canonical code only by surrounding
+    whitespace is dropped: the rule strips before matching, so such a value
+    would never be flagged. Whitespace problems are MD012's job.
+    """
+    from app.rules.loader import load_ruleset
+
+    rule = load_ruleset().by_id("MD010")
+    if rule is None:
+        return {}
+    variants = rule.params.get("variants", {})
+    return {
+        canonical: [
+            alias
+            for alias in aliases
+            if alias.strip().lower() != canonical.strip().lower()
+        ]
+        for canonical, aliases in variants.items()
+    }
 
 _ACCOUNT_TYPES = ["Asset", "Liability", "Equity", "Revenue", "Expense"]
 
@@ -196,21 +232,33 @@ def _record_id(prefix: str, index: int) -> str:
 
 
 def _gstin(rng: random.Random) -> str:
-    """A well-formed GSTIN: 2 state digits, 10-char PAN, entity, Z, checksum."""
+    """A well-formed GSTIN: 2 state digits, 10-char PAN, entity, Z, checksum.
+
+    The PAN segment is 5 letters, 4 digits, 1 letter. Drawing the letter
+    positions from the full alphanumeric alphabet would put digits there and
+    produce GSTINs the format rule correctly rejects.
+    """
     state = rng.choice([f"{n:02d}" for n in range(1, 38)])
-    pan = "".join(rng.choice(_GSTIN_ALPHABET) for _ in range(5))
+    pan = "".join(rng.choice(string.ascii_uppercase) for _ in range(5))
     pan += "".join(str(rng.randint(0, 9)) for _ in range(4))
-    pan += rng.choice(_GSTIN_ALPHABET)
+    pan += rng.choice(string.ascii_uppercase)
     entity = str(rng.randint(1, 9))
     checksum = rng.choice(_GSTIN_ALPHABET)
     return f"{state}{pan}{entity}Z{checksum}"
 
 
 def _pan(rng: random.Random) -> str:
+    """A structurally valid PAN: 5 letters, 4 digits, 1 letter.
+
+    The fourth character encodes the holder type and the fifth is the first
+    letter of the surname, so both must be letters. Drawing from the full
+    alphabet would put digits there and make the generator emit records that the
+    PAN rule correctly flags — noise that would obscure the injected defects.
+    """
     return (
-        "".join(rng.choice(_GSTIN_ALPHABET) for _ in range(5))
+        "".join(rng.choice(string.ascii_uppercase) for _ in range(5))
         + "".join(str(rng.randint(0, 9)) for _ in range(4))
-        + rng.choice(_GSTIN_ALPHABET)
+        + rng.choice(string.ascii_uppercase)
     )
 
 
@@ -219,10 +267,54 @@ def _phone(rng: random.Random) -> str:
 
 
 def _company_name(rng: random.Random) -> str:
+    """A plausible company name."""
     return (
-        f"{rng.choice(_NAME_PREFIX)} {rng.choice(_NAME_SUFFIX)} "
-        f"{rng.choice(_LEGAL_FORM)}"
+        f"{rng.choice(_NAME_PREFIX)} {rng.choice(_NAME_BRAND)} "
+        f"{rng.choice(_NAME_BRAND)} {rng.choice(_NAME_SUFFIX)} {rng.choice(_LEGAL_FORM)}"
     )
+
+
+# Mixed-radix name pool. The product of these lengths is the cycle length of
+# the name sequence, and the divisors below must match it exactly for the
+# mapping to be a bijection.
+_NAME_RADIX = (
+    len(_NAME_PREFIX),
+    len(_NAME_BRAND),
+    len(_NAME_BRAND),
+    len(_NAME_SUFFIX),
+    len(_LEGAL_FORM),
+)
+_NAME_POOL_SIZE = 1
+for _radix in _NAME_RADIX:
+    _NAME_POOL_SIZE *= _radix
+
+
+def _unique_name(index: int, rng: random.Random) -> str:
+    """A company name that is unique and unrelated to its neighbours.
+
+    Uniqueness alone is not enough. Appending the index, or any scheme where
+    consecutive records get consecutive names, leaves neighbouring names 95%
+    similar and the fuzzy rule then flags clean records. The name is therefore
+    a mixed-radix decode of a scrambled index, so uniqueness holds by
+    construction and adjacent records land on unrelated words.
+    """
+    j = _scramble(index)
+    prefix = _NAME_PREFIX[j % len(_NAME_PREFIX)]
+    brand_a = _NAME_BRAND[(j // _NAME_RADIX[0]) % len(_NAME_BRAND)]
+    brand_b = _NAME_BRAND[(j // (_NAME_RADIX[0] * _NAME_RADIX[1])) % len(_NAME_BRAND)]
+    suffix = _NAME_SUFFIX[(j // (_NAME_RADIX[0] * _NAME_RADIX[1] * _NAME_RADIX[2])) % len(_NAME_SUFFIX)]
+    legal = _LEGAL_FORM[(j // (_NAME_RADIX[0] * _NAME_RADIX[1] * _NAME_RADIX[2] * _NAME_RADIX[3])) % len(_LEGAL_FORM)]
+    return f"{prefix} {brand_a} {brand_b} {suffix} {legal}"
+
+
+def _scramble(index: int) -> int:
+    """A deterministic bijection that spreads consecutive indices far apart.
+
+    Multiplication by a constant coprime with the pool size is a bijection on
+    the residues, so no two indices collide and consecutive indices map to
+    widely separated values.
+    """
+    return (index * 2_654_435_761) % _NAME_POOL_SIZE
 
 
 def _fuzzy_variant(rng: random.Random, name: str) -> str:
@@ -261,18 +353,48 @@ class DemoDataGenerator:
         counts: RecordCounts | None = None,
         plan: DefectPlan | None = None,
         reference_date: date | None = None,
+        stale_years: int | None = None,
     ) -> None:
         self.seed = seed
         self.rng = random.Random(seed)
         self.np_rng = np.random.default_rng(seed)
         self.counts = counts or RecordCounts()
         self.plan = plan or DefectPlan()
-        self.reference_date = reference_date or date(2026, 1, 1)
+        self.reference_date = reference_date or date.fromisoformat(settings.reference_date)
+        # Kept in step with the validator so the injected staleness boundary is
+        # exactly the boundary the rule engine applies.
+        self.stale_years = stale_years if stale_years is not None else settings.archive_after_years
         self.defects: list[Defect] = []
         self._defect_seq = 0
         self.frames: dict[str, pd.DataFrame] = {}
+        # Row positions already carrying an injected defect for the entity being
+        # built. Injectors draw only from the complement, so no row is damaged
+        # twice. Without this, one record could be both a duplicate and a bad
+        # GSTIN, and the manifest would only record one of the two.
+        self._used: set[int] = set()
 
     # ------------------------------------------------------------- helpers --
+    def _reset_used(self) -> None:
+        """Row positions are per frame, so the non-overlap set is per entity.
+
+        Keeping one set across entities would make a position in the customer
+        file collide with the same position in the supplier file, which is
+        meaningless and would silently under-inject.
+        """
+        self._used = set()
+
+    def _sample_clean(self, n_rows: int, n_defects: int) -> np.ndarray:
+        """Distinct, not-yet-damaged row positions. Exact count, never reused."""
+        available = np.array(
+            [i for i in range(n_rows) if i not in self._used], dtype=int
+        )
+        n = min(n_defects, len(available))
+        if n <= 0:
+            return np.array([], dtype=int)
+        picked = self.np_rng.choice(available, size=n, replace=False)
+        self._used.update(int(i) for i in picked)
+        return picked
+
     def _add_defect(
         self,
         defect_type: str,
@@ -300,7 +422,7 @@ class DemoDataGenerator:
         )
 
     def _sample_indices(self, n_rows: int, n_defects: int) -> np.ndarray:
-        """Distinct row positions to damage, so counts stay exact."""
+        """Distinct row positions, without the non-overlap guarantee."""
         n = min(n_defects, n_rows)
         return self.np_rng.choice(n_rows, size=n, replace=False)
 
@@ -354,14 +476,15 @@ class DemoDataGenerator:
             }
             for i, code in enumerate(CANONICAL_UOM)
         ]
-        # Extra units so the master has more than the canonical set.
+        # Extra units so the master has more than the canonical set. Names are
+        # already title case so the whitespace/casing rule does not flag them.
         for i in range(len(CANONICAL_UOM), self.counts.uom):
             code = f"UOM{i:02d}"
             rows.append(
                 {
                     "record_id": _record_id("UOM", i + 1),
                     "uom_code": code,
-                    "name": f"Auxiliary unit {i}",
+                    "name": f"Auxiliary Unit {i}",
                     "base_uom_code": "PCS",
                     "conversion_factor": round(self.rng.uniform(1, 50), 4),
                 }
@@ -398,13 +521,18 @@ class DemoDataGenerator:
     def build_suppliers(self) -> pd.DataFrame:
         n = self.counts.suppliers
         rows = []
+        # Names are drawn from a unique sequence rather than at random. Random
+        # draws collide: with 1,500 records from a 432,000-combination pool,
+        # about two pairs per entity land on the same name by chance, and the
+        # fuzzy rule then correctly flags two clean records. Assigning each
+        # record its own name removes that noise entirely.
         for i in range(n):
             city, state, pin = self.rng.choice(_CITIES)
             rows.append(
                 {
                     "record_id": _record_id("SUP", i + 1),
                     "supplier_code": f"SUP-{i + 1:05d}",
-                    "name": _company_name(self.rng),
+                    "name": _unique_name(i, self.rng),
                     "gstin": _gstin(self.rng),
                     "pan": _pan(self.rng),
                     "email": f"contact{i}@supplier{i}.example.com",
@@ -432,7 +560,10 @@ class DemoDataGenerator:
                 {
                     "record_id": _record_id("CUS", i + 1),
                     "customer_code": f"CUS-{i + 1:05d}",
-                    "name": _company_name(self.rng),
+                    # Offset so a customer never shares a name with a supplier;
+                    # the fuzzy rule compares within one entity, but keeping the
+                    # two pools disjoint makes the data easier to reason about.
+                    "name": _unique_name(i + 10_000_000, self.rng),
                     "gstin": _gstin(self.rng),
                     "pan": _pan(self.rng),
                     "email": f"ap{i}@customer{i}.example.com",
@@ -495,18 +626,29 @@ class DemoDataGenerator:
 
     # ----------------------------------------------------------- finance ----
     def build_gl_balances(self) -> pd.DataFrame:
+        """A trial balance that genuinely balances, period by period.
+
+        Rows are generated as debit/credit pairs of equal amount inside the same
+        fiscal period. That makes every period balance by construction, so the
+        only unbalanced periods are the ones deliberately injected. Generating
+        debits and credits independently, as an earlier version did, leaves every
+        period unbalanced and makes the trial balance rule fire on clean data.
+        """
         n = self.counts.gl_balances
         account_codes = [f"{1000 + i}" for i in range(self.counts.chart_of_accounts)]
-        rows = []
-        for i in range(n):
+        rows: list[dict] = []
+        seq = 0
+        for _ in range(n // 2):
             fiscal_year = self.rng.choice([2023, 2024, 2025])
             period = self.rng.randint(1, 12)
             amount = round(self.rng.uniform(1000, 250_000), 2)
-            # A balanced pair: one debit line and one credit line per entry.
+            debit_account = self.rng.choice(account_codes)
+            credit_account = self.rng.choice(account_codes)
+            seq += 1
             rows.append(
                 {
-                    "record_id": _record_id("GLB", i + 1),
-                    "account_code": self.rng.choice(account_codes),
+                    "record_id": _record_id("GLB", seq),
+                    "account_code": debit_account,
                     "fiscal_year": fiscal_year,
                     "period": period,
                     "debit": amount,
@@ -514,23 +656,19 @@ class DemoDataGenerator:
                     "currency": "INR",
                 }
             )
-        # Mirror each debit with an equal credit on a different account so the
-        # clean dataset balances by construction.
-        credits = rows[: n // 2]
-        mirrored = []
-        for i, row in enumerate(credits):
-            mirrored.append(
+            seq += 1
+            rows.append(
                 {
-                    "record_id": _record_id("GLB", n + i + 1),
-                    "account_code": self.rng.choice(account_codes),
-                    "fiscal_year": row["fiscal_year"],
-                    "period": row["period"],
+                    "record_id": _record_id("GLB", seq),
+                    "account_code": credit_account,
+                    "fiscal_year": fiscal_year,
+                    "period": period,
                     "debit": 0.0,
-                    "credit": row["debit"],
+                    "credit": amount,
                     "currency": "INR",
                 }
             )
-        return pd.DataFrame(rows + mirrored)
+        return pd.DataFrame(rows)
 
     def build_purchase_orders(self) -> pd.DataFrame:
         n = self.counts.purchase_orders
@@ -556,8 +694,14 @@ class DemoDataGenerator:
         customer_codes = [f"CUS-{i + 1:05d}" for i in range(self.counts.customers)]
         tax_codes = [f"GST{r}" for r in (5, 12, 18, 28)] + ["EXEMPT", "ZERO"]
         rows = []
+        # Invoices are dated at least the payment term before the reference
+        # date. Dating them later would push the derived due date into the
+        # future, which the impossible-date rule correctly flags, leaving
+        # unexplained findings in otherwise clean data.
+        latest_invoice_date = self.reference_date - timedelta(days=31)
         for i in range(n):
-            invoice_date = self.reference_date - timedelta(days=self.rng.randint(1, 1500))
+            span = (latest_invoice_date - (self.reference_date - timedelta(days=1500))).days
+            invoice_date = latest_invoice_date - timedelta(days=self.rng.randint(0, max(span, 1)))
             subtotal = round(self.rng.uniform(500, 750_000), 2)
             tax_amount = round(subtotal * 0.18, 2)
             rows.append(
@@ -634,27 +778,37 @@ class DemoDataGenerator:
 
     # --------------------------------------------------------- injectors ----
     def _inject_duplicate_exact(self, df: pd.DataFrame, entity: str, key: str, prefix: str) -> pd.DataFrame:
-        """Copy whole rows so the primary key is genuinely violated."""
+        """Copy whole rows so the business key is genuinely duplicated.
+
+        The defect is recorded against the *copy*, because the copy is the row
+        the rule flags: the first occurrence in file order is kept as the
+        survivor. Getting this the wrong way round would make recall look poor
+        even though the rule found every duplicate.
+        """
         if len(df) < self.plan.duplicate_exact:
             return df
-        idx = self._sample_indices(len(df), self.plan.duplicate_exact)
+        idx = self._sample_clean(len(df), self.plan.duplicate_exact)
         dupes = df.iloc[idx].copy()
-        for pos, (_, row) in zip(idx, dupes.iterrows()):
-            original_id = row["record_id"]
+        new_ids = [_record_id(prefix + "D", i + 1) for i in range(len(dupes))]
+        dupes["record_id"] = new_ids
+
+        for dupe_id, (_, row) in zip(new_ids, dupes.iterrows()):
             self._add_defect(
-                "duplicate_exact", entity, original_id, key, "MD001", "blocker", True,
-                f"Exact duplicate of {row[key]} (also present as {original_id}).",
+                "duplicate_exact", entity, dupe_id, key, "MD001", "blocker", True,
+                f"Exact duplicate of {row[key]} (copied from {row['record_id']}).",
             )
-        dupes["record_id"] = [
-            _record_id(prefix + "D", i + 1) for i in range(len(dupes))
-        ]
         return pd.concat([df, dupes], ignore_index=True)
 
     def _inject_duplicate_fuzzy(self, df: pd.DataFrame, entity: str, key: str) -> pd.DataFrame:
-        """New key, near-identical name: a merge candidate, not a hard clash."""
+        """New key, near-identical name: a merge candidate, not a hard clash.
+
+        The new key is built by appending a suffix, which makes it sort after
+        the original. The rule reports the pair against the larger key, so the
+        appended row is the one flagged — the same row the manifest names.
+        """
         if len(df) < self.plan.duplicate_fuzzy:
             return df
-        idx = self._sample_indices(len(df), self.plan.duplicate_fuzzy)
+        idx = self._sample_clean(len(df), self.plan.duplicate_fuzzy)
         new_rows = []
         for n, pos in enumerate(idx):
             row = df.iloc[pos].to_dict()
@@ -662,7 +816,8 @@ class DemoDataGenerator:
             row["name"] = _fuzzy_variant(self.rng, str(row["name"]))
             new_id = _record_id("FUZ", n + 1)
             row["record_id"] = new_id
-            # Give it a distinct code so it is a merge candidate, not a clash.
+            # A suffix that sorts after the original key, so the original is
+            # always the survivor the rule keeps.
             row[key] = f"{row[key]}-DUP{n + 1}"
             if "gstin" in row:
                 row["gstin"] = _gstin(self.rng)
@@ -677,7 +832,14 @@ class DemoDataGenerator:
         return pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
 
     def _inject_missing_mandatory(self, df: pd.DataFrame, entity: str, fields: list[str]) -> pd.DataFrame:
-        idx = self._sample_indices(len(df), self.plan.missing_mandatory)
+        """Blank a mandatory field on some rows.
+
+        Business keys are deliberately not blanked on master entities. A blank
+        supplier code would orphan every purchase order that references it, so
+        one injected defect would produce hundreds of legitimate but unlabelled
+        findings and the detection measurement would lose its meaning.
+        """
+        idx = self._sample_clean(len(df), self.plan.missing_mandatory)
         for pos in idx:
             fld = self.rng.choice(fields)
             df.iat[pos, df.columns.get_loc(fld)] = ""
@@ -689,8 +851,17 @@ class DemoDataGenerator:
         return df
 
     def _inject_bad_tax_ids(self, df: pd.DataFrame, entity: str) -> pd.DataFrame:
-        idx = self._sample_indices(len(df), self.plan.invalid_gstin)
-        bad = ["27AAPFU0939F1Z", "INVALIDGSTIN12345", "29AABCU9603R1Z", "000000000000000", "27AAPFU0939F1ZV"]
+        idx = self._sample_clean(len(df), self.plan.invalid_gstin)
+        # Every value here fails the 15-character checksum format. The previous
+        # list held two values that were in fact well formed, so the rule was
+        # right to accept them and only the manifest was wrong.
+        bad = [
+            "27AAPFU0939F1Z",     # 14 characters, too short
+            "INVALIDGSTIN12345",  # 17 characters, letters in the state digits
+            "000000000000000",    # digits where the PAN letters belong
+            "GSTIN123",           # far too short
+            "ZZAAPFU0939F1Z1",    # state prefix is not numeric
+        ]
         for pos in idx:
             value = self.rng.choice(bad)
             df.iat[pos, df.columns.get_loc("gstin")] = value
@@ -699,7 +870,7 @@ class DemoDataGenerator:
                 "gstin", "MD004", "blocker", False,
                 f"GSTIN {value!r} fails the 15-character checksum format.",
             )
-        idx = self._sample_indices(len(df), self.plan.invalid_pan)
+        idx = self._sample_clean(len(df), self.plan.invalid_pan)
         for pos in idx:
             value = self.rng.choice(["ABCDE1234", "ABCD12345F", "12345ABCDE6", "ABCDE1234F9"])
             df.iat[pos, df.columns.get_loc("pan")] = value
@@ -711,7 +882,7 @@ class DemoDataGenerator:
         return df
 
     def _inject_bad_contacts(self, df: pd.DataFrame, entity: str) -> pd.DataFrame:
-        idx = self._sample_indices(len(df), self.plan.invalid_email)
+        idx = self._sample_clean(len(df), self.plan.invalid_email)
         for pos in idx:
             value = self.rng.choice(
                 ["not-an-email", "user@@example.com", "missing-at-sign.com", "user@", "@example.com"]
@@ -721,7 +892,7 @@ class DemoDataGenerator:
                 "invalid_email", entity, str(df.iat[pos, df.columns.get_loc("record_id")]),
                 "email", "MD006", "warn", False, f"Email {value!r} is not a valid address.",
             )
-        idx = self._sample_indices(len(df), self.plan.invalid_pincode)
+        idx = self._sample_clean(len(df), self.plan.invalid_pincode)
         for pos in idx:
             value = self.rng.choice(["12345", "9999999", "ABCDEF", "000000", "40001"])
             df.iat[pos, df.columns.get_loc("pincode")] = value
@@ -730,7 +901,7 @@ class DemoDataGenerator:
                 "pincode", "MD007", "warn", False,
                 f"Pincode {value!r} is not a 6-digit Indian postcode.",
             )
-        idx = self._sample_indices(len(df), self.plan.invalid_phone)
+        idx = self._sample_clean(len(df), self.plan.invalid_phone)
         for pos in idx:
             value = self.rng.choice(["12345", "+91-abc-def", "0000000000", "+9199999999999999"])
             df.iat[pos, df.columns.get_loc("phone")] = value
@@ -742,21 +913,26 @@ class DemoDataGenerator:
 
     def _inject_uom_problems(self, items: pd.DataFrame, uom_master: pd.DataFrame) -> pd.DataFrame:
         known = set(uom_master["uom_code"])
-        idx = self._sample_indices(len(items), self.plan.uom_variant)
+        variants = uom_variants()
+        idx = self._sample_clean(len(items), self.plan.uom_variant)
         for pos in idx:
             canonical = str(items.iat[pos, items.columns.get_loc("uom_code")])
-            if canonical not in UOM_VARIANTS:
+            if canonical not in variants or not variants[canonical]:
                 canonical = "PCS"
-            variant = self.rng.choice(UOM_VARIANTS[canonical])
+            variant = self.rng.choice(variants[canonical])
             items.iat[pos, items.columns.get_loc("uom_code")] = variant
             self._add_defect(
                 "uom_variant", "items", str(items.iat[pos, items.columns.get_loc("record_id")]),
                 "uom_code", "MD010", "warn", True,
                 f"Unit {variant!r} is a variant of {canonical!r}; normalise to {canonical}.",
             )
-        idx = self._sample_indices(len(items), self.plan.uom_unknown)
+        idx = self._sample_clean(len(items), self.plan.uom_unknown)
         for pos in idx:
-            value = self.rng.choice(["XZ9", "??", "UNKNOWN", "N/A"])
+            # Junk that is clearly not a unit. Values like "N/A" and "?" are
+            # excluded on purpose: the profiler treats them as empty, so they
+            # would never reach the orphan check and the defect would be
+            # undetectable by design.
+            value = self.rng.choice(["XZ9", "UNITS", "NOUNIT", "UNDEF", "0", "999"])
             items.iat[pos, items.columns.get_loc("uom_code")] = value
             self._add_defect(
                 "uom_unknown", "items", str(items.iat[pos, items.columns.get_loc("record_id")]),
@@ -766,11 +942,23 @@ class DemoDataGenerator:
         return items
 
     def _inject_stale_records(self, df: pd.DataFrame, entity: str) -> pd.DataFrame:
-        idx = self._sample_indices(len(df), self.plan.stale_record)
-        cutoff = self.reference_date - timedelta(days=365 * 3)
+        """Push activity dates past the staleness cutoff.
+
+        The cutoff is computed the same way the validator computes it — calendar
+        years back from the reference date, not a fixed number of days — so a
+        record marked stale here is certain to be flagged as stale there. Using
+        an approximate 365-day year would put records near the boundary on the
+        wrong side of the line and make recall look worse than it is.
+        """
+        idx = self._sample_clean(len(df), self.plan.stale_record)
+        cutoff = pd.Timestamp(self.reference_date) - pd.DateOffset(
+            years=self.stale_years
+        )
         for pos in idx:
-            when = cutoff - timedelta(days=self.rng.randint(1, 1500))
-            df.iat[pos, df.columns.get_loc("last_activity_date")] = when.strftime("%Y-%m-%d")
+            # A further 1 to 5 years beyond the cutoff, so every injected record
+            # is comfortably inside the stale window.
+            when = (cutoff - pd.DateOffset(days=self.rng.randint(30, 5 * 365))).date()
+            df.iat[pos, df.columns.get_loc("last_activity_date")] = when.isoformat()
             df.iat[pos, df.columns.get_loc("is_active")] = "true"
             self._add_defect(
                 "stale_record", entity, str(df.iat[pos, df.columns.get_loc("record_id")]),
@@ -779,20 +967,36 @@ class DemoDataGenerator:
             )
         return df
 
-    def _inject_whitespace_case(self, df: pd.DataFrame, entity: str, fields: list[str]) -> pd.DataFrame:
-        idx = self._sample_indices(len(df), self.plan.whitespace_case)
+    def _inject_whitespace_case(
+        self, df: pd.DataFrame, entity: str, fields: list[str], title_fields: list[str]
+    ) -> pd.DataFrame:
+        """Damage formatting in a way the rule is certain to catch.
+
+        Whitespace problems are injected in any column, but casing problems only
+        in columns the rule treats as title case. Injecting a casing change into
+        a column the rule does not check for casing would produce a defect that
+        no rule is meant to find, and recall would read as a rule failure.
+        """
+        idx = self._sample_clean(len(df), self.plan.whitespace_case)
         for pos in idx:
             fld = self.rng.choice(fields)
             current = str(df.iat[pos, df.columns.get_loc(fld)])
-            style = self.rng.choice(["pad", "upper", "lower", "double"])
+            styles = ["pad", "double"]
+            if fld in title_fields:
+                # An all-upper string is how real data writes acronyms, so the
+                # rule tolerates it. These styles produce genuine inconsistency.
+                styles += ["lower", "mixed"]
+            style = self.rng.choice(styles)
             if style == "pad":
                 new = f"  {current} "
-            elif style == "upper":
-                new = current.upper()
+            elif style == "double":
+                new = current.replace(" ", "  ")
             elif style == "lower":
                 new = current.lower()
             else:
-                new = current.replace(" ", "  ")
+                new = current.lower().capitalize()
+            if new == current:
+                continue
             df.iat[pos, df.columns.get_loc(fld)] = new
             self._add_defect(
                 "whitespace_case", entity, str(df.iat[pos, df.columns.get_loc("record_id")]),
@@ -802,7 +1006,13 @@ class DemoDataGenerator:
         return df
 
     def _inject_date_formats(self, df: pd.DataFrame, entity: str, fields: list[str]) -> pd.DataFrame:
-        idx = self._sample_indices(len(df), self.plan.date_format)
+        """Render some dates in a non-ISO format.
+
+        A row already carrying an impossible date is skipped: rewriting its
+        format would leave the manifest claiming two defects on one record when
+        the second injection had overwritten the first.
+        """
+        idx = self._sample_clean(len(df), self.plan.date_format)
         for pos in idx:
             fld = self.rng.choice(fields)
             raw = str(df.iat[pos, df.columns.get_loc(fld)])
@@ -834,7 +1044,7 @@ class DemoDataGenerator:
             "items": self.plan.orphan_category,
             "gl_balances": self.plan.orphan_account,
         }[entity]
-        idx = self._sample_indices(len(child), n)
+        idx = self._sample_clean(len(child), n)
         rule = {
             "invoices": "REF001",
             "purchase_orders": "REF002",
@@ -852,12 +1062,22 @@ class DemoDataGenerator:
         return child
 
     def _inject_unbalanced_ledger(self, gl: pd.DataFrame) -> pd.DataFrame:
-        """Break the debit/credit balance for a set of (year, period) buckets."""
+        """Break the debit/credit balance for a set of (year, period) buckets.
+
+        One defect per bucket. The trial balance rule reports per bucket, not
+        per row, so injecting twice into the same period would produce two
+        labelled defects but only one finding, and recall would read as a miss
+        when the rule had in fact caught everything.
+
+        The injected debit is larger than any clean line, so the rule attaches
+        its finding to this row rather than to an unrelated one in the period.
+        """
         buckets = gl.groupby(["fiscal_year", "period"]).size()
         targets = self._pick(list(buckets.index), self.plan.unbalanced_ledger)
+        max_clean = 300_000.0
         new_rows = []
         for n, (year, period) in enumerate(targets):
-            amount = round(self.rng.uniform(10_000, 90_000), 2)
+            amount = round(self.rng.uniform(max_clean, max_clean * 2), 2)
             rid = _record_id("GLU", n + 1)
             new_rows.append(
                 {
@@ -881,7 +1101,7 @@ class DemoDataGenerator:
         retired = tax.loc[tax["is_retired"] == "true", "tax_code"].tolist()
         if not retired:
             return invoices
-        idx = self._sample_indices(len(invoices), self.plan.retired_tax_code)
+        idx = self._sample_clean(len(invoices), self.plan.retired_tax_code)
         for pos in idx:
             code = self.rng.choice(retired)
             invoices.iat[pos, invoices.columns.get_loc("tax_code")] = code
@@ -894,7 +1114,7 @@ class DemoDataGenerator:
         return invoices
 
     def _inject_currency_mismatch(self, invoices: pd.DataFrame, customers: pd.DataFrame) -> pd.DataFrame:
-        idx = self._sample_indices(len(invoices), self.plan.currency_mismatch)
+        idx = self._sample_clean(len(invoices), self.plan.currency_mismatch)
         for pos in idx:
             invoices.iat[pos, invoices.columns.get_loc("currency")] = self.rng.choice(["USD", "EUR"])
             self._add_defect(
@@ -906,7 +1126,7 @@ class DemoDataGenerator:
         return invoices
 
     def _inject_negative_stock(self, stock: pd.DataFrame) -> pd.DataFrame:
-        idx = self._sample_indices(len(stock), self.plan.negative_stock)
+        idx = self._sample_clean(len(stock), self.plan.negative_stock)
         for pos in idx:
             value = -float(self.rng.randint(1, 500))
             stock.iat[pos, stock.columns.get_loc("qty_on_hand")] = value
@@ -919,19 +1139,35 @@ class DemoDataGenerator:
         return stock
 
     def _inject_impossible_dates(self, invoices: pd.DataFrame) -> pd.DataFrame:
-        idx = self._sample_indices(len(invoices), self.plan.impossible_date)
+        idx = self._sample_clean(len(invoices), self.plan.impossible_date)
         for n, pos in enumerate(idx):
             mode = n % 3
             if mode == 0:
                 value = (self.reference_date + timedelta(days=self.rng.randint(30, 900))).isoformat()
                 field = "invoice_date"
                 why = "invoice date is in the future"
+                # Move the due date with it. Leaving the due date behind would
+                # create a second, unlabelled defect (due before invoice) on the
+                # same record.
+                invoices.iat[pos, invoices.columns.get_loc("due_date")] = (
+                    date.fromisoformat(value) + timedelta(days=30)
+                ).isoformat()
             elif mode == 1:
                 value = "1899-12-31"
                 field = "invoice_date"
                 why = "invoice date predates the company"
             else:
-                value = (self.reference_date - timedelta(days=self.rng.randint(500, 1500))).isoformat()
+                # Derive the due date from this row's own invoice date. Setting
+                # it independently, as an earlier version did, sometimes left the
+                # due date after the invoice date, so the defect never existed
+                # and the miss looked like a rule failure rather than a
+                # generator one.
+                current = str(invoices.iat[pos, invoices.columns.get_loc("invoice_date")])
+                try:
+                    invoice_date = date.fromisoformat(current)
+                except ValueError:
+                    continue
+                value = (invoice_date - timedelta(days=30)).isoformat()
                 field = "due_date"
                 why = "due date falls before the invoice date"
             invoices.iat[pos, invoices.columns.get_loc(field)] = value
@@ -943,7 +1179,7 @@ class DemoDataGenerator:
         return invoices
 
     def _inject_duplicate_invoices(self, invoices: pd.DataFrame) -> pd.DataFrame:
-        idx = self._sample_indices(len(invoices), self.plan.duplicate_invoice)
+        idx = self._sample_clean(len(invoices), self.plan.duplicate_invoice)
         new_rows = []
         for n, pos in enumerate(idx):
             row = invoices.iloc[pos].to_dict()
@@ -958,10 +1194,13 @@ class DemoDataGenerator:
         return pd.concat([invoices, pd.DataFrame(new_rows)], ignore_index=True)
 
     def _inject_salary_outliers(self, payroll: pd.DataFrame) -> pd.DataFrame:
-        idx = self._sample_indices(len(payroll), self.plan.salary_outlier)
+        idx = self._sample_clean(len(payroll), self.plan.salary_outlier)
         for pos in idx:
             normal = float(payroll.iat[pos, payroll.columns.get_loc("gross_salary")])
-            outlier = round(normal * self.rng.uniform(8, 25), 2)
+            # Well above the rule's multiplier. A factor close to the threshold
+            # would let the department median drift once several outliers land in
+            # the same department, and some injections would stop being outliers.
+            outlier = round(normal * self.rng.uniform(20, 40), 2)
             payroll.iat[pos, payroll.columns.get_loc("gross_salary")] = outlier
             payroll.iat[pos, payroll.columns.get_loc("net_salary")] = round(outlier * 0.72, 2)
             self._add_defect(
@@ -973,7 +1212,7 @@ class DemoDataGenerator:
         return payroll
 
     def _inject_negative_amounts(self, invoices: pd.DataFrame) -> pd.DataFrame:
-        idx = self._sample_indices(len(invoices), self.plan.negative_amount)
+        idx = self._sample_clean(len(invoices), self.plan.negative_amount)
         for pos in idx:
             amount = -round(self.rng.uniform(500, 50_000), 2)
             invoices.iat[pos, invoices.columns.get_loc("total_amount")] = amount
@@ -1004,52 +1243,71 @@ class DemoDataGenerator:
         payroll = self.build_employees_payroll()
 
         # Master data defects.
+        #
+        # Each injector draws from row positions no other injector has touched,
+        # so one record never carries two defects. The manifest stays an exact
+        # account of the damage, which is what makes the detection rate a real
+        # measurement rather than an estimate.
         for df, entity, key, prefix, name_fields in (
             (suppliers, "suppliers", "supplier_code", "SUPD", ["name", "city", "payment_terms"]),
             (customers, "customers", "customer_code", "CUSD", ["name", "city"]),
         ):
+            self._reset_used()
             df = self._inject_duplicate_exact(df, entity, key, prefix)
             df = self._inject_duplicate_fuzzy(df, entity, key)
-            df = self._inject_missing_mandatory(df, entity, [key, "name"])
             df = self._inject_bad_tax_ids(df, entity)
             df = self._inject_bad_contacts(df, entity)
             df = self._inject_stale_records(df, entity)
-            df = self._inject_whitespace_case(df, entity, name_fields)
+            df = self._inject_whitespace_case(df, entity, name_fields, ["name", "city", "state"])
+            # Only non-key mandatory fields are blanked. Blanking a master
+            # business key would orphan every child document that references it,
+            # turning one labelled defect into hundreds of unlabelled findings.
+            df = self._inject_missing_mandatory(df, entity, ["name"])
             if entity == "suppliers":
                 suppliers = df
             else:
                 customers = df
 
+        self._reset_used()
         items = self._inject_uom_problems(items, uom)
-        items = self._inject_missing_mandatory(items, "items", ["item_code", "name"])
-        items = self._inject_whitespace_case(items, "items", ["name"])
+        items = self._inject_whitespace_case(items, "items", ["name"], ["name"])
         items = self._inject_date_formats(items, "items", ["last_activity_date"])
         items = self._inject_stale_records(items, "items")
+        items = self._inject_missing_mandatory(items, "items", ["name"])
 
-        # Referential integrity.
+        # Referential integrity, now that every master frame is final.
+        self._reset_used()
         invoices = self._inject_orphans(
             invoices, "invoices", "customer_code", set(customers["customer_code"])
         )
+        self._reset_used()
         pos = self._inject_orphans(
             pos, "purchase_orders", "supplier_code", set(suppliers["supplier_code"])
         )
+        self._reset_used()
         items = self._inject_orphans(
             items, "items", "category_code", set(categories["category_code"])
         )
+        self._reset_used()
         gl = self._inject_orphans(
             gl, "gl_balances", "account_code", set(accounts["account_code"])
         )
 
-        # Finance defects.
+        # Finance defects. The non-overlap set is reset here because the block
+        # above left it holding gl_balances row positions, which mean nothing
+        # for the invoice frame.
+        self._reset_used()
         gl = self._inject_unbalanced_ledger(gl)
         invoices = self._inject_retired_tax_codes(invoices, tax)
         invoices = self._inject_currency_mismatch(invoices, customers)
         invoices = self._inject_impossible_dates(invoices)
-        invoices = self._inject_duplicate_invoices(invoices)
-        invoices = self._inject_negative_amounts(invoices)
         invoices = self._inject_date_formats(invoices, "invoices", ["invoice_date"])
+        invoices = self._inject_negative_amounts(invoices)
+        invoices = self._inject_duplicate_invoices(invoices)
         invoices = self._inject_missing_mandatory(invoices, "invoices", ["invoice_number"])
+        self._reset_used()
         stock = self._inject_negative_stock(stock)
+        self._reset_used()
         payroll = self._inject_salary_outliers(payroll)
 
         self.frames = {

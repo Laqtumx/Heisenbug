@@ -1,0 +1,626 @@
+{
+  "version": "1.0.0",
+  "description": "Validation rule configuration. Rules are data, not code: adding a check for a new entity means adding an entry here, not editing the engine. Each rule names a rule_type, which the engine resolves to a registered vectorised implementation.",
+  "thresholds": {
+    "stale_activity_years": 3,
+    "fuzzy_duplicate_score": 88,
+    "salary_outlier_multiplier": 5.0,
+    "zscore_outlier_threshold": 4.0,
+    "iqr_outlier_multiplier": 3.0,
+    "earliest_plausible_date": "1990-01-01"
+  },
+  "rules": [
+    {
+      "rule_id": "MD001",
+      "name": "Exact duplicate master record",
+      "category": "master_data",
+      "rule_type": "duplicate_exact",
+      "severity": "blocker",
+      "auto_fixable": true,
+      "enabled": true,
+      "entities": [
+        "suppliers",
+        "customers",
+        "items"
+      ],
+      "params": {
+        "key_column": "$primary_key"
+      },
+      "message": "Duplicate {key_column} value {value!r} appears {count} times.",
+      "suggested_fix": "Merge the duplicates using the survivorship rule (most complete, then most recent)."
+    },
+    {
+      "rule_id": "MD002",
+      "name": "Fuzzy duplicate master record",
+      "category": "master_data",
+      "rule_type": "duplicate_fuzzy",
+      "severity": "warn",
+      "auto_fixable": true,
+      "enabled": true,
+      "entities": [
+        "suppliers",
+        "customers"
+      ],
+      "params": {
+        "match_columns": [
+          "name"
+        ],
+        "score_threshold": "$fuzzy_duplicate_score"
+      },
+      "message": "Name {value!r} closely matches {match_value!r} ({score}% similar) on a different code.",
+      "suggested_fix": "Merge into the record with the more complete and more recently active profile."
+    },
+    {
+      "rule_id": "MD003",
+      "name": "Missing mandatory field",
+      "category": "master_data",
+      "rule_type": "missing_mandatory",
+      "severity": "blocker",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "$all"
+      ],
+      "params": {
+        "columns": "$mandatory_columns"
+      },
+      "message": "Mandatory field {column} is empty.",
+      "suggested_fix": "Obtain the missing value from the source system owner before migrating."
+    },
+    {
+      "rule_id": "MD004",
+      "name": "Invalid GSTIN",
+      "category": "master_data",
+      "rule_type": "invalid_format",
+      "severity": "blocker",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "suppliers",
+        "customers"
+      ],
+      "params": {
+        "column": "gstin",
+        "pattern": "^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$",
+        "description": "15 characters: 2 state digits, 10-character PAN, entity number, Z, checksum."
+      },
+      "message": "GSTIN {value!r} does not match the required format.",
+      "suggested_fix": "Verify the GSTIN against the GST portal and correct it, or blank it and flag the vendor for review."
+    },
+    {
+      "rule_id": "MD005",
+      "name": "Invalid PAN",
+      "category": "master_data",
+      "rule_type": "invalid_format",
+      "severity": "warn",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "suppliers",
+        "customers"
+      ],
+      "params": {
+        "column": "pan",
+        "pattern": "^[A-Z]{5}[0-9]{4}[A-Z]$",
+        "description": "5 letters, 4 digits, 1 letter."
+      },
+      "message": "PAN {value!r} does not match the required format.",
+      "suggested_fix": "Correct the PAN from the vendor's tax registration certificate."
+    },
+    {
+      "rule_id": "MD006",
+      "name": "Invalid email address",
+      "category": "master_data",
+      "rule_type": "invalid_format",
+      "severity": "warn",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "suppliers",
+        "customers"
+      ],
+      "params": {
+        "column": "email",
+        "pattern": "^[^@\\s]+@[^@\\s]+\\.[A-Za-z]{2,}$",
+        "description": "Local part, single at-sign, domain with a dot."
+      },
+      "message": "Email {value!r} is not a valid address.",
+      "suggested_fix": "Correct the address or blank it; email is not a mandatory field."
+    },
+    {
+      "rule_id": "MD007",
+      "name": "Invalid pincode",
+      "category": "master_data",
+      "rule_type": "invalid_format",
+      "severity": "warn",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "suppliers",
+        "customers"
+      ],
+      "params": {
+        "column": "pincode",
+        "pattern": "^[1-9][0-9]{5}$",
+        "description": "6 digits, not starting with zero."
+      },
+      "message": "Pincode {value!r} is not a valid 6-digit Indian postcode.",
+      "suggested_fix": "Look the pincode up from the city and state on the record."
+    },
+    {
+      "rule_id": "MD008",
+      "name": "Invalid phone number",
+      "category": "master_data",
+      "rule_type": "invalid_format",
+      "severity": "info",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "suppliers",
+        "customers"
+      ],
+      "params": {
+        "column": "phone",
+        "pattern": "^(\\+91[- ]?)?[6-9][0-9]{9}$",
+        "description": "Optional +91 country code, then 10 digits starting 6 to 9."
+      },
+      "message": "Phone {value!r} is not a valid Indian mobile number.",
+      "suggested_fix": "Normalise to +91XXXXXXXXXX format."
+    },
+    {
+      "rule_id": "MD009",
+      "name": "Unknown unit of measure",
+      "category": "master_data",
+      "rule_type": "referential_orphan",
+      "severity": "blocker",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "items",
+        "inventory_stock"
+      ],
+      "params": {
+        "column": "uom_code",
+        "parent_entity": "uom",
+        "parent_column": "uom_code"
+      },
+      "message": "Unit of measure {value!r} does not exist in the UoM master.",
+      "suggested_fix": "Add the unit to the UoM master or map it to an existing unit."
+    },
+    {
+      "rule_id": "MD010",
+      "name": "Inconsistent unit of measure spelling",
+      "category": "master_data",
+      "rule_type": "uom_variant",
+      "severity": "warn",
+      "auto_fixable": true,
+      "enabled": true,
+      "entities": [
+        "items",
+        "inventory_stock"
+      ],
+      "params": {
+        "column": "uom_code",
+        "parent_entity": "uom",
+        "parent_column": "uom_code",
+        "variants": {
+          "KG": [
+            "Kgs",
+            "kgs",
+            "Kg.",
+            "K.G.",
+            "Kilogram",
+            "Kilograms"
+          ],
+          "PCS": [
+            "Pcs.",
+            " PC",
+            "Nos",
+            "nos",
+            "No",
+            "Numbers",
+            "Piece",
+            "Pieces"
+          ],
+          "LTR": [
+            "Litre",
+            " Lit",
+            "LTRS",
+            "Liter",
+            "Liters"
+          ],
+          "BOX": [
+            "Bx",
+            "Boxes"
+          ],
+          "MTR": [
+            "Meter",
+            "Meters",
+            "Metre",
+            "Metres"
+          ],
+          "SET": [
+            "Set.",
+            "Sets"
+          ],
+          "PKT": [
+            "Packet",
+            "Packets"
+          ],
+          "TON": [
+            "Tonne",
+            "Tonnes"
+          ]
+        }
+      },
+      "message": "Unit {value!r} is a variant of the canonical unit {canonical!r}.",
+      "suggested_fix": "Normalise to the canonical unit {canonical}."
+    },
+    {
+      "rule_id": "MD011",
+      "name": "Obsolete record with no recent activity",
+      "category": "master_data",
+      "rule_type": "stale_record",
+      "severity": "warn",
+      "auto_fixable": true,
+      "enabled": true,
+      "entities": [
+        "suppliers",
+        "customers",
+        "items"
+      ],
+      "params": {
+        "column": "last_activity_date",
+        "years": "$stale_activity_years",
+        "action": "archive"
+      },
+      "message": "No activity since {value} ({years} years). Archive rather than migrate.",
+      "suggested_fix": "Move to the archive set so the record is preserved but not loaded into the new ERP."
+    },
+    {
+      "rule_id": "MD012",
+      "name": "Inconsistent whitespace or casing",
+      "category": "master_data",
+      "rule_type": "whitespace_case",
+      "severity": "info",
+      "auto_fixable": true,
+      "enabled": true,
+      "entities": [
+        "$all"
+      ],
+      "params": {
+        "columns": [
+          "name",
+          "city",
+          "state",
+          "payment_terms",
+          "item_code",
+          "supplier_code",
+          "customer_code"
+        ],
+        "title_case_columns": [
+          "name",
+          "city",
+          "state"
+        ]
+      },
+      "message": "Field {column} has stray whitespace or inconsistent casing ({issue}).",
+      "suggested_fix": "Trim whitespace, collapse repeated spaces and apply consistent title case."
+    },
+    {
+      "rule_id": "MD013",
+      "name": "Non-ISO date format",
+      "category": "master_data",
+      "rule_type": "date_format",
+      "severity": "info",
+      "auto_fixable": true,
+      "enabled": true,
+      "entities": [
+        "$all"
+      ],
+      "params": {
+        "columns": [
+          "invoice_date",
+          "due_date",
+          "order_date",
+          "last_activity_date",
+          "effective_from",
+          "effective_to"
+        ],
+        "target_format": "%Y-%m-%d"
+      },
+      "message": "Date field {column} uses a non-ISO format ({value!r}).",
+      "suggested_fix": "Normalise to ISO 8601 (YYYY-MM-DD)."
+    },
+    {
+      "rule_id": "REF001",
+      "name": "Invoice references a missing customer",
+      "category": "referential",
+      "rule_type": "referential_orphan",
+      "severity": "blocker",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "invoices"
+      ],
+      "params": {
+        "column": "customer_code",
+        "parent_entity": "customers",
+        "parent_column": "customer_code"
+      },
+      "message": "Customer {value!r} does not exist in the customer master.",
+      "suggested_fix": "Create the missing customer from the invoice header, or quarantine the invoice."
+    },
+    {
+      "rule_id": "REF002",
+      "name": "Purchase order references a missing supplier",
+      "category": "referential",
+      "rule_type": "referential_orphan",
+      "severity": "blocker",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "purchase_orders"
+      ],
+      "params": {
+        "column": "supplier_code",
+        "parent_entity": "suppliers",
+        "parent_column": "supplier_code"
+      },
+      "message": "Supplier {value!r} does not exist in the supplier master.",
+      "suggested_fix": "Create the missing supplier, or quarantine the purchase order."
+    },
+    {
+      "rule_id": "REF003",
+      "name": "Item references a missing category",
+      "category": "referential",
+      "rule_type": "referential_orphan",
+      "severity": "blocker",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "items"
+      ],
+      "params": {
+        "column": "category_code",
+        "parent_entity": "categories",
+        "parent_column": "category_code"
+      },
+      "message": "Category {value!r} does not exist in the category master.",
+      "suggested_fix": "Assign the item to an existing category, or create the missing category."
+    },
+    {
+      "rule_id": "REF004",
+      "name": "Ledger line references a missing account",
+      "category": "referential",
+      "rule_type": "referential_orphan",
+      "severity": "blocker",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "gl_balances"
+      ],
+      "params": {
+        "column": "account_code",
+        "parent_entity": "chart_of_accounts",
+        "parent_column": "account_code"
+      },
+      "message": "Account {value!r} does not exist in the chart of accounts.",
+      "suggested_fix": "Map the account to the new chart of accounts, or quarantine the ledger line."
+    },
+    {
+      "rule_id": "FIN001",
+      "name": "Trial balance does not balance",
+      "category": "finance",
+      "rule_type": "trial_balance",
+      "severity": "blocker",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "gl_balances"
+      ],
+      "params": {
+        "debit_column": "debit",
+        "credit_column": "credit",
+        "group_columns": [
+          "fiscal_year",
+          "period"
+        ],
+        "tolerance": 0.01
+      },
+      "message": "Period {fiscal_year}-{period} is out of balance by {difference} (debits {debit_total}, credits {credit_total}).",
+      "suggested_fix": "Investigate the unbalanced period with the finance controller before loading."
+    },
+    {
+      "rule_id": "FIN002",
+      "name": "Retired tax code in use",
+      "category": "finance",
+      "rule_type": "retired_reference",
+      "severity": "blocker",
+      "auto_fixable": true,
+      "enabled": true,
+      "entities": [
+        "invoices"
+      ],
+      "params": {
+        "column": "tax_code",
+        "parent_entity": "tax_codes",
+        "parent_column": "tax_code",
+        "retired_column": "is_retired"
+      },
+      "message": "Tax code {value!r} is retired and must not be used on migrated documents.",
+      "suggested_fix": "Map to the current equivalent tax code, or reclassify as exempt."
+    },
+    {
+      "rule_id": "FIN003",
+      "name": "Currency mismatch with master record",
+      "category": "finance",
+      "rule_type": "currency_mismatch",
+      "severity": "warn",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "invoices"
+      ],
+      "params": {
+        "column": "currency",
+        "parent_entity": "customers",
+        "parent_key": "customer_code",
+        "parent_column": "currency"
+      },
+      "message": "Invoice currency {value!r} differs from the customer currency {parent_value!r}.",
+      "suggested_fix": "Confirm the invoicing currency, then either convert or correct the customer record."
+    },
+    {
+      "rule_id": "FIN004",
+      "name": "Negative stock on hand",
+      "category": "finance",
+      "rule_type": "negative_value",
+      "severity": "blocker",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "inventory_stock"
+      ],
+      "params": {
+        "column": "qty_on_hand",
+        "allow_zero": true
+      },
+      "message": "Quantity on hand is negative ({value}).",
+      "suggested_fix": "Recount the physical stock and correct the opening balance."
+    },
+    {
+      "rule_id": "FIN005",
+      "name": "Impossible date",
+      "category": "finance",
+      "rule_type": "impossible_date",
+      "severity": "blocker",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "invoices",
+        "purchase_orders",
+        "gl_balances"
+      ],
+      "params": {
+        "date_columns": [
+          "invoice_date",
+          "due_date",
+          "order_date"
+        ],
+        "order_pairs": [
+          [
+            "invoice_date",
+            "due_date"
+          ]
+        ],
+        "earliest": "$earliest_plausible_date",
+        "allow_future_days": 0
+      },
+      "message": "{reason} ({column} = {value}).",
+      "suggested_fix": "Correct the date against the source document."
+    },
+    {
+      "rule_id": "FIN006",
+      "name": "Duplicate invoice number",
+      "category": "finance",
+      "rule_type": "duplicate_exact",
+      "severity": "blocker",
+      "auto_fixable": true,
+      "enabled": true,
+      "entities": [
+        "invoices"
+      ],
+      "params": {
+        "key_column": "invoice_number"
+      },
+      "message": "Invoice number {value!r} appears {count} times.",
+      "suggested_fix": "Keep the earliest complete invoice and reject the rest as duplicates."
+    },
+    {
+      "rule_id": "FIN007",
+      "name": "Salary outlier",
+      "category": "finance",
+      "rule_type": "statistical_outlier",
+      "severity": "warn",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "employees_payroll_summary"
+      ],
+      "params": {
+        "column": "gross_salary",
+        "group_by": [
+          "department"
+        ],
+        "multiplier": "$salary_outlier_multiplier"
+      },
+      "message": "Gross salary {value} is {ratio}x the {group} median ({median}).",
+      "suggested_fix": "Verify the salary with HR; it may be a data entry error."
+    },
+    {
+      "rule_id": "FIN008",
+      "name": "Negative invoice total",
+      "category": "finance",
+      "rule_type": "negative_value",
+      "severity": "warn",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "invoices"
+      ],
+      "params": {
+        "column": "total_amount",
+        "allow_zero": true
+      },
+      "message": "Invoice total is negative ({value}) without a credit note flag.",
+      "suggested_fix": "Mark as a credit note, or correct the amount."
+    },
+    {
+      "rule_id": "FIN009",
+      "name": "Invoice total does not equal subtotal plus tax",
+      "category": "finance",
+      "rule_type": "arithmetic_check",
+      "severity": "warn",
+      "auto_fixable": false,
+      "enabled": true,
+      "entities": [
+        "invoices"
+      ],
+      "params": {
+        "result_column": "total_amount",
+        "operands": [
+          "subtotal",
+          "tax_amount"
+        ],
+        "operator": "add",
+        "tolerance": 0.02
+      },
+      "message": "Total {value} does not equal subtotal plus tax ({expected}).",
+      "suggested_fix": "Recalculate the invoice total from its components."
+    },
+    {
+      "rule_id": "INT001",
+      "name": "Mixed date formats in one column",
+      "category": "master_data",
+      "rule_type": "mixed_date_formats",
+      "severity": "warn",
+      "auto_fixable": true,
+      "enabled": true,
+      "entities": [
+        "$all"
+      ],
+      "params": {
+        "columns": [
+          "invoice_date",
+          "due_date",
+          "order_date",
+          "last_activity_date"
+        ],
+        "min_distinct_formats": 2
+      },
+      "message": "{column} contains {format_count} different date formats.",
+      "suggested_fix": "Normalise every value in the column to ISO 8601."
+    }
+  ]
+}

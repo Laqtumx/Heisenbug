@@ -29,6 +29,10 @@ var/
 *.log
 .data/
 
+# Generated demo data. Reproduce with `make seed` or
+# scripts/generate_demo_data.py; the seed makes it byte-identical.
+data/legacy/
+
 # Build artefacts
 dist/
 build/

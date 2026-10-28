@@ -21,8 +21,30 @@ pytestmark = pytest.mark.security
 
 @pytest.fixture(scope="module", autouse=True)
 def seed_master_data() -> None:
-    """Two suppliers, one customer, one invoice, one PO, one catalogue row."""
+    """Two suppliers, one customer, one invoice, one PO, one catalogue row.
+
+    Rows are removed before seeding and again afterwards. Without the cleanup
+    each run adds another set of rows, the `source_ref like 'rls-%'` queries
+    match every earlier run's rows, and the assertions fail on data left behind
+    by a previous session rather than on anything the current run did.
+    Children are deleted before their parents so the foreign keys hold.
+    """
     marker = f"rls-{uuid.uuid4().hex[:8]}"
+
+    def purge() -> None:
+        with service_session() as session:
+            for table in (
+                "invoices",
+                "purchase_orders",
+                "supplier_catalog",
+                "suppliers",
+                "customers",
+            ):
+                session.execute(
+                    text(f"delete from public.{table} where source_ref like 'rls-%'")
+                )
+
+    purge()
     with service_session() as session:
         for code in ("SUP-A", "SUP-B"):
             session.execute(
@@ -71,6 +93,7 @@ def seed_master_data() -> None:
             {"r": f"{marker}-CAT"},
         )
     yield marker
+    purge()
 
 
 def test_supplier_sees_only_own_supplier_row(rls) -> None:

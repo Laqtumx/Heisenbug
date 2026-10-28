@@ -82,6 +82,10 @@ class Settings(BaseSettings):
 
     # Stale master data older than this many years is archived, not migrated.
     archive_after_years: int = 3
+    # The date staleness, future-dating and ageing checks are measured against.
+    # Fixed rather than "today" so a validation run is reproducible: a batch
+    # validated today and re-validated next month must produce the same findings.
+    reference_date: str = "2026-01-01"
     # Fuzzy duplicate detection threshold (0-100).
     fuzzy_duplicate_threshold: int = 88
     # Rows above this are processed in vectorised chunks.
