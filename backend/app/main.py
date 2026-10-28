@@ -164,7 +164,9 @@ def health() -> dict:
         checks["postgres"] = {"status": "error", "detail": str(exc)}
     checks["mongo"] = mongo.healthcheck()
     checks["encryption"] = "configured" if encryption_ready() else "derived-dev-key"
-    checks["llm"] = settings.llm_provider if settings.llm_enabled else "disabled"
+    # The LLM client is not implemented, so report that rather than the
+    # configured provider, which would read as if calls were being made.
+    checks["llm"] = "not-implemented"
     checks["ok"] = (
         checks["postgres"].get("postgres") == "ok"
         and checks["mongo"].get("mongo") == "ok"

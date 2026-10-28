@@ -17,8 +17,8 @@ The pipeline runs in stages. Each stage writes a status row and an audit entry.
 3. Validate. Run the rule engine over the data and record each finding with a
    severity, a message and a suggested fix.
 4. Clean. Fix the safe problems automatically and queue the rest for a human.
-5. Map. Ask the LLM for legacy-to-target column mappings, with a confidence
-   score. The LLM suggests; a person approves.
+5. Map. Legacy-to-target column mapping. The stage is declared and shows in the
+   wizard, but the LLM that would fill it is not wired up yet. See Status below.
 6. Dry run. Load into a sandbox schema and reconcile. Counts and financial
    totals must match before the load is allowed.
 7. Load. Write to the target ERP tables in dependency order, transactionally
@@ -53,10 +53,10 @@ flowchart LR
     ROL[rollback]
   end
 
-  subgraph LLM[LLMClient]
+  subgraph LLM[LLM client - not wired up yet]
     GRK[Grok]
     NEM[Nemotron]
-    FAL[deterministic fallback<br/>cache, timeout]
+    FAL[deterministic fallback]
   end
 
   PG[(Postgres / Supabase<br/>staging, target ERP, audit, RBAC, RLS)]
@@ -168,7 +168,8 @@ ledgers, dead vendors, mixed units of measure and impossible dates. It writes
 `defects_manifest.csv`, and the detection harness scores the rule engine
 against it.
 
-Current result on the full dataset: 100% recall, 99.8% precision.
+Current result on the full dataset: 100% recall, 99.81% precision (6,279
+injected defects, all 6,279 caught).
 
 ## API
 
@@ -201,10 +202,28 @@ Tests run against real Postgres and Mongo, not mocks. Start the databases with
 ## Configuration
 
 All settings have working defaults for local development. See `.env.example`.
+You do not need any keys to run the platform. The `LLM_*`, `GROK_*` and
+`NEMOTRON_*` settings are read but not yet used, because the LLM client is not
+implemented. See Status below.
 
-The LLM keys are optional. With no key, the pipeline uses a deterministic
-fallback, so a demo cannot break because an API is slow or down. AI output is
-always a suggestion that a person approves, and every AI action is logged.
+## Status
+
+Built and working: schema, RBAC, RLS, ingest, profile, validate, clean, review
+queue, dry run, load, rollback, reconciliation, audit log, reports, the
+dashboards and the demo data generator. The test suite covers these.
+
+Not built yet:
+
+- The LLM client. There is no `LLMClient`, no call to Grok or Nemotron, and no
+  deterministic fallback. The `map` stage is declared and appears in the wizard,
+  but nothing runs it, so it stays pending. No AI mapping or plain-English
+  explanation is produced, and `review_queue.ai_suggestion` is empty.
+- The verify and sign-off stages. Reconciliation and the health score are
+  computed by the load stage and shown on the dashboards, but there is no
+  separate verify endpoint or go-live checklist.
+- Postman collection, the architecture and flow diagrams as separate files, and
+  the three-minute demo script. The diagrams in this README are the current
+  source.
 
 ## Notes
 
