@@ -14,7 +14,7 @@ help:
 	@echo "  make demo-data  generate the synthetic legacy dataset into data/legacy"
 	@echo "  make seed       load demo users and run a full end-to-end migration"
 	@echo "  make api        run the FastAPI server on :8000"
-	@echo "  make web        run the Next.js frontend on :3000"
+	@echo "  make web        run the Next.js frontend (PORT, default 3000)"
 	@echo "  make test       run the whole pytest suite"
 	@echo "  make test-fast  run everything except the slow pipeline tests"
 

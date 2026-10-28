@@ -56,6 +56,11 @@ class RuleContext:
             reference_date = date.fromisoformat(settings.reference_date)
         self.reference_date = reference_date
         self.max_findings = max_findings
+        # Parent keys a child still points at, keyed by (parent entity, parent
+        # column). The cleaner consults this before archiving a master record:
+        # dropping a parent that an invoice still references does not clean the
+        # data, it manufactures orphans.
+        self.protected_keys: dict[tuple[str, str], set[str]] = {}
 
     def frame(self, entity: str) -> pd.DataFrame:
         return self.frames.get(entity, pd.DataFrame())

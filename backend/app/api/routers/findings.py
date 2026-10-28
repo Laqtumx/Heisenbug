@@ -55,7 +55,7 @@ def list_findings(
         where.append("entity = :entity")
         params["entity"] = entity
     if severity:
-        where.append("severity = cast(:severity as finding_severity)")
+        where.append("severity = cast(:severity as severity)")
         params["severity"] = severity
     if rule_id:
         where.append("rule_id = :rule_id")
@@ -113,6 +113,11 @@ def summary(
     batch_id = parse_batch_id(batch_id)
     batch = get_batch_or_404(session, batch_id)
     data = findings_summary(session, batch_id)
+    # The gauge shows the current score, which is the post-clean score once the
+    # cleaner has run. Reporting the pre-clean score here made the dashboard
+    # contradict the batch list, which reads the after column directly.
+    after = batch.get("health_score_after")
+    before = batch.get("health_score_before")
     return FindingsSummary(
         batch_id=batch_id,
         total=data.get("total", 0),
@@ -120,7 +125,7 @@ def summary(
         by_entity=data.get("by_entity", {}),
         by_rule=data.get("by_rule", {}),
         by_status=data.get("by_status", {}),
-        health_score=batch.get("health_score_before"),
+        health_score=after if after is not None else before,
     )
 
 

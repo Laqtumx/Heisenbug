@@ -623,7 +623,8 @@ def migration_health_score(session: Session, batch_id: str) -> dict[str, Any]:
     batch = session.execute(
         text(
             """
-            select health_score_before, status, record_count_in, record_count_loaded,
+            select health_score_before, health_score_after, status,
+                   record_count_in, record_count_loaded,
                    record_count_archived, record_count_rejected
               from public.migration_batches
              where id = cast(:b as uuid)
@@ -634,7 +635,12 @@ def migration_health_score(session: Session, batch_id: str) -> dict[str, Any]:
     if batch is None:
         raise LookupError(f"batch {batch_id} not found")
 
-    base = float(batch["health_score_before"] or 0.0)
+    # Once the cleaner has scored the cleaned frames, that is the score the
+    # batch actually carries into the new ERP. Falling back to the before score
+    # would report the data as worse than it is and understate the work done.
+    after = batch["health_score_after"]
+    before = batch["health_score_before"]
+    base = float(after if after is not None else (before if before is not None else 0.0))
 
     load_report = session.execute(
         text(
