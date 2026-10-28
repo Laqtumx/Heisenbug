@@ -29,6 +29,7 @@ import pandas as pd
 from rapidfuzz import fuzz, process
 
 from app.config import settings
+from app.pipeline.normalise import DATE_FORMATS, is_title_case_ok, parse_dates
 from app.pipeline.profile import NULL_TOKENS
 from app.pipeline.entities import EntitySpec
 
@@ -466,7 +467,7 @@ def check_stale_record(
     if column not in frame.columns:
         return []
 
-    parsed = pd.to_datetime(frame[column].astype(str).str.strip(), errors="coerce", format="mixed")
+    parsed = parse_dates(frame[column])
     cutoff = pd.Timestamp(ctx.reference_date) - pd.DateOffset(years=years)
     mask = parsed.notna() & (parsed < cutoff)
     if not mask.any():
@@ -502,24 +503,12 @@ _WHITESPACE_RE = re.compile(r"\s{2,}")
 def _title_case_issue(values: pd.Series) -> pd.Series:
     """Rows whose casing is inconsistent, ignoring acronyms.
 
-    A naive comparison against ``str.title()`` flags every legitimate acronym:
-    "LLP" becomes "Llp", "GST" becomes "Gst". Real master data is full of
-    acronyms, so the check tolerates any token that is already all upper case
-    and only reports genuinely inconsistent casing such as "ACME industries" or
-    "acme industries".
+    Delegates to the shared normal form in ``pipeline.normalise`` so the check
+    and the cleaner agree on what "correct casing" means. When the two had
+    separate implementations the cleaner could rewrite a value the rule still
+    flagged, and the finding would survive its own fix.
     """
-    collapsed = values.str.replace(_WHITESPACE_RE, " ", regex=True).str.strip()
-    titled = collapsed.str.title()
-    differs = (collapsed != titled) & (collapsed.str.len() > 0)
-    if not differs.any():
-        return differs
-
-    def acronym_tolerant(text: str) -> bool:
-        return all(token.isupper() or token == token.title() for token in text.split())
-
-    # Only rows that already differ from title case need the token-level check.
-    tolerant = collapsed[differs].map(acronym_tolerant)
-    return differs & ~tolerant.reindex(values.index, fill_value=False)
+    return ~is_title_case_ok(values)
 
 
 def check_whitespace_case(
@@ -590,7 +579,7 @@ def check_date_format(
         non_blank = ~values.isin(NULL_TOKENS)
         non_iso = non_blank & ~values.str.match(_ISO_RE, na=False)
         # Only flag values that are actually dates in another format.
-        parseable = pd.to_datetime(values.where(non_iso), errors="coerce", format="mixed").notna()
+        parseable = parse_dates(values.where(non_iso)).notna()
         mask = non_iso & parseable
         if not mask.any():
             continue
@@ -615,7 +604,6 @@ def check_date_format(
     return findings
 
 
-_DATE_FORMATS = ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%b-%Y", "%d.%m.%Y", "%Y%m%d"]
 
 
 def check_mixed_date_formats(
@@ -639,7 +627,7 @@ def check_mixed_date_formats(
             continue
 
         detected: dict[str, int] = {}
-        for fmt in _DATE_FORMATS:
+        for fmt in DATE_FORMATS:
             try:
                 parsed = pd.to_datetime(values, format=fmt, errors="coerce")
             except (ValueError, TypeError):

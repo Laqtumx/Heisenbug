@@ -29,12 +29,14 @@ from app.security import audit
 
 logger = logging.getLogger(__name__)
 
-# A blocker means the record cannot be loaded as-is. Weighted heavily so the
-# health score reflects load readiness rather than raw issue count.
-SEVERITY_WEIGHT = {"blocker": 10.0, "warn": 3.0, "info": 1.0}
+# What share of a record's value survives to the new ERP, by the worst finding
+# it carries. A blocker means the record cannot load unattended, so it counts
+# for nothing. A warning means it needs a reviewer to look at it, which is real
+# work but not a showstopper. An info is cosmetic.
+LOADABILITY = {"blocker": 0.0, "warn": 0.4, "info": 0.9}
 
-# Points deducted per 1% of records carrying a finding at that severity.
-SEVERITY_PENALTY_PER_PCT = {"blocker": 1.4, "warn": 0.55, "info": 0.18}
+# Worst wins: a record with a blocker and a warning is scored as blocked.
+SEVERITY_RANK = {"info": 0, "warn": 1, "blocker": 2}
 
 
 @dataclass
@@ -44,6 +46,7 @@ class ValidationResult:
     findings_by_severity: dict[str, int]
     findings_by_category: dict[str, int]
     findings_by_rule: dict[str, int]
+    records_by_worst_severity: dict[str, int]
     health_score: float
     total_records: int
     affected_records: int
@@ -66,6 +69,7 @@ class ValidationResult:
             "findings_by_severity": self.findings_by_severity,
             "findings_by_category": self.findings_by_category,
             "findings_by_rule": self.findings_by_rule,
+            "records_by_worst_severity": self.records_by_worst_severity,
             "rule_errors": self.rule_errors,
         }
 
@@ -75,32 +79,38 @@ def compute_health_score(
     total_records: int,
     findings_by_severity: dict[str, int],
     affected_records: int,
+    records_by_worst_severity: dict[str, int] | None = None,
 ) -> float:
     """A 0-100 score for how ready the batch is to load.
 
-    Two pressures push the score down:
+    The score answers one question: what share of this batch can reach the new
+    ERP without a person intervening? Each affected record is discounted by the
+    worst finding it carries, and unaffected records count in full. So a batch
+    where a fifth of the records are blocked scores in the 70s no matter how
+    many thousands of info findings sit alongside them.
 
-    * the share of records carrying at least one finding (breadth), and
-    * the severity mix of the findings themselves (depth).
-
-    A batch with a handful of info findings on 50,000 records scores in the 90s.
-    A batch where a third of the records are blocked scores in the 40s, which is
-    what the demo starts from.
+    ``records_by_worst_severity`` is the honest input: it counts records, not
+    findings, so one record with forty warnings is one discounted record rather
+    than forty. When it is absent the score falls back to counting findings per
+    severity, which over-penalises batches with many findings on few records.
     """
     if total_records <= 0:
         return 0.0
 
-    affected_pct = min(affected_records / total_records * 100, 100.0)
-    breadth_penalty = affected_pct * 0.65
+    if records_by_worst_severity is not None:
+        scored = 0.0
+        for severity, count in records_by_worst_severity.items():
+            scored += count * LOADABILITY.get(severity, 0.5)
+        clean = total_records - sum(records_by_worst_severity.values())
+        scored += max(clean, 0)
+        return round(max(0.0, min(100.0, scored / total_records * 100)), 2)
 
-    depth_penalty = 0.0
+    # Fallback: no per-record breakdown available.
+    affected = min(affected_records, total_records)
+    penalty = 0.0
     for severity, count in findings_by_severity.items():
-        weight = SEVERITY_WEIGHT.get(severity, 1.0)
-        # Normalise per 1,000 records so a big batch is not punished for size.
-        rate = count / total_records * 1000
-        depth_penalty += min(rate * weight * 0.02, 12.0)
-
-    score = 100.0 - breadth_penalty - depth_penalty
+        penalty += count * (1.0 - LOADABILITY.get(severity, 0.5))
+    score = 100.0 - (penalty / total_records * 100)
     return round(max(0.0, min(100.0, score)), 2)
 
 
@@ -185,6 +195,9 @@ def run_validation(
     by_rule: Counter[str] = Counter()
     by_entity: Counter[str] = Counter()
     affected_records: set[str] = set()
+    # Worst severity per record, so the health score can discount a record once
+    # rather than once per finding.
+    worst_by_record: dict[str, str] = {}
     rule_errors: list[str] = []
     rules_run = 0
 
@@ -224,15 +237,24 @@ def run_validation(
                 by_rule[rule.rule_id] += 1
                 by_entity[entity] += 1
                 if finding.get("record_id"):
-                    affected_records.add(f"{entity}:{finding['record_id']}")
+                    key = f"{entity}:{finding['record_id']}"
+                    affected_records.add(key)
+                    severity = finding["severity"]
+                    previous = worst_by_record.get(key)
+                    if previous is None or SEVERITY_RANK.get(
+                        severity, 0
+                    ) > SEVERITY_RANK.get(previous, 0):
+                        worst_by_record[key] = severity
 
             _persist_findings(session, batch_id, entity, rule, findings)
 
     duration_ms = int((time.perf_counter() - started) * 1000)
+    records_by_worst: Counter[str] = Counter(worst_by_record.values())
     health_score = compute_health_score(
         total_records=total_records,
         findings_by_severity=dict(by_severity),
         affected_records=len(affected_records),
+        records_by_worst_severity=dict(records_by_worst),
     )
 
     result = ValidationResult(
@@ -241,6 +263,7 @@ def run_validation(
         findings_by_severity=dict(by_severity),
         findings_by_category=dict(by_category),
         findings_by_rule=dict(by_rule),
+        records_by_worst_severity=dict(records_by_worst),
         health_score=health_score,
         total_records=total_records,
         affected_records=len(affected_records),

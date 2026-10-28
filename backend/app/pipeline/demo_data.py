@@ -359,7 +359,12 @@ class DemoDataGenerator:
         self.rng = random.Random(seed)
         self.np_rng = np.random.default_rng(seed)
         self.counts = counts or RecordCounts()
-        self.plan = plan or DefectPlan()
+        # An explicit plan is honoured as given. Otherwise the plan is scaled to
+        # the record counts, because the default plan is sized for the full
+        # dataset: a caller asking for 60 suppliers but getting a plan that
+        # wants 200 duplicates would silently inject no duplicates at all, and
+        # the dataset would be missing whole defect classes.
+        self.plan = plan or self._derive_plan(self.counts)
         self.reference_date = reference_date or date.fromisoformat(settings.reference_date)
         # Kept in step with the validator so the injected staleness boundary is
         # exactly the boundary the rule engine applies.
@@ -391,6 +396,15 @@ class DemoDataGenerator:
         n = min(n_defects, len(available))
         if n <= 0:
             return np.array([], dtype=int)
+        if n < n_defects:
+            # A shortfall means this defect class will be under-represented in
+            # the manifest. It is usually a sign the plan is too large for the
+            # entity, so it is worth seeing rather than silently absorbing.
+            logger.warning(
+                "could only draw %s of %s requested defect rows for this entity",
+                n,
+                n_defects,
+            )
         picked = self.np_rng.choice(available, size=n, replace=False)
         self._used.update(int(i) for i in picked)
         return picked
@@ -491,18 +505,32 @@ class DemoDataGenerator:
             )
         return pd.DataFrame(rows)
 
+    def _retired_tax_code_count(self) -> int:
+        """How many tax codes to mark retired.
+
+        A few, not most: the retired-reference rule is a blocker, and a dataset
+        where most codes are retired would make clean invoices indistinguishable
+        from the ones deliberately injected with a retired code.
+        """
+        return max(1, min(5, self.counts.tax_codes // 4))
+
     def build_tax_codes(self) -> pd.DataFrame:
         rows = []
         standard = [
             ("GST5", 5.0, "GST"), ("GST12", 12.0, "GST"), ("GST18", 18.0, "GST"),
             ("GST28", 28.0, "GST"), ("EXEMPT", 0.0, "GST"), ("ZERO", 0.0, "GST"),
         ]
+        # Retired codes are the extra ones, never the standard set. Clean
+        # invoices draw their tax code from the standard set, so retiring a
+        # standard code would turn every invoice using it into a finding and
+        # swamp the labelled defects with unlabelled ones.
+        retired_from = max(len(standard), self.counts.tax_codes - self._retired_tax_code_count())
         for i in range(self.counts.tax_codes):
             if i < len(standard):
                 code, rate, tax_type = standard[i]
             else:
                 code, rate, tax_type = f"TC{i:03d}", float(self.rng.choice([1, 2, 3, 5, 12, 18])), "GST"
-            retired = i >= self.counts.tax_codes - 5  # last five are retired
+            retired = i >= retired_from
             rows.append(
                 {
                     "record_id": _record_id("TAX", i + 1),
@@ -689,10 +717,16 @@ class DemoDataGenerator:
             )
         return pd.DataFrame(rows)
 
-    def build_invoices(self) -> pd.DataFrame:
+    def build_invoices(self, tax: pd.DataFrame | None = None) -> pd.DataFrame:
         n = self.counts.invoices
         customer_codes = [f"CUS-{i + 1:05d}" for i in range(self.counts.customers)]
-        tax_codes = [f"GST{r}" for r in (5, 12, 18, 28)] + ["EXEMPT", "ZERO"]
+        # Only non-retired codes, so a clean invoice never trips the
+        # retired-reference rule. The retired ones are injected deliberately.
+        if tax is not None and "is_retired" in tax.columns:
+            active = tax.loc[tax["is_retired"].astype(str) != "true", "tax_code"].tolist()
+            tax_codes = active or [f"GST{r}" for r in (5, 12, 18, 28)]
+        else:
+            tax_codes = [f"GST{r}" for r in (5, 12, 18, 28)] + ["EXEMPT", "ZERO"]
         rows = []
         # Invoices are dated at least the payment term before the reference
         # date. Dating them later would push the derived due date into the
@@ -1225,6 +1259,24 @@ class DemoDataGenerator:
         return invoices
 
     # ------------------------------------------------------------- driver ---
+    def _derive_plan(self, counts: RecordCounts) -> DefectPlan:
+        """Scale the default defect plan to the requested record counts.
+
+        The ratio is taken against the default counts, so a dataset built at
+        full size gets the full plan and a smaller one gets a proportionally
+        smaller plan. Every defect class stays present, which matters because
+        the detection test asserts that each one is caught.
+        """
+        base = DefectPlan()
+        ratio = counts.total() / RecordCounts().total()
+        if ratio >= 1.0:
+            return base
+        scaled = {
+            name: max(1, int(getattr(base, name) * ratio))
+            for name in base.__dataclass_fields__
+        }
+        return DefectPlan(**scaled)
+
     def generate(self) -> DemoDataset:
         logger.info("generating demo data with seed=%s", self.seed)
 
@@ -1237,7 +1289,7 @@ class DemoDataGenerator:
         accounts = self.build_chart_of_accounts()
         gl = self.build_gl_balances()
         pos = self.build_purchase_orders()
-        invoices = self.build_invoices()
+        invoices = self.build_invoices(tax)
         stock = self.build_inventory_stock()
         catalog = self.build_supplier_catalog()
         payroll = self.build_employees_payroll()
