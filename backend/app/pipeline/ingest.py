@@ -308,7 +308,9 @@ def ingest_dataframe(
                        select coalesce(sum(row_count), 0)
                          from public.ingested_files
                         where batch_id = cast(:b as uuid)
-                   )
+                   ),
+                   health_score_before = null,
+                   health_score_after = null
              where id = cast(:b as uuid)
             """
         ),

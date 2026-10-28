@@ -71,6 +71,29 @@ def _baseline_counts() -> dict[str, int]:
     return counts
 
 
+def _default_supplier_code() -> str | None:
+    """A supplier that actually has purchase orders.
+
+    The external probe needs a supplier code, because that is what the policy
+    matches on. Without one the probe reports zero for every table, which is
+    correct for an unlinked account but makes the matrix look broken. Picking a
+    supplier with orders shows what a real external account sees: its own rows
+    and nothing else.
+    """
+    with service_session() as session:
+        return session.execute(
+            text(
+                """
+                select supplier_code
+                  from public.purchase_orders
+                 group by supplier_code
+                 order by count(*) desc, supplier_code
+                 limit 1
+                """
+            )
+        ).scalar()
+
+
 def _probe_role(
     role: str, supplier_code: str | None, baseline: dict[str, int]
 ) -> list[RlsProbeOut]:
@@ -132,10 +155,11 @@ def rls_matrix(
     the people already trusted with the log.
     """
     baseline = _baseline_counts()
+    external_code = supplier_code or _default_supplier_code()
     roles: dict[str, list[RlsProbeOut]] = {}
     for role in ROLES:
         roles[role] = _probe_role(
-            role, supplier_code if role == "supplier" else None, baseline
+            role, external_code if role == "supplier" else None, baseline
         )
 
     # The interesting comparisons: which roles can see each area.
@@ -149,6 +173,7 @@ def rls_matrix(
         roles=roles,
         summary=summary,
         enforced_by="postgres row level security, acting as the non-superuser role",
+        supplier_code=external_code,
     )
 
 
@@ -169,10 +194,11 @@ def rls_table_matrix(
         )
 
     baseline = _baseline_counts()
+    external_code = supplier_code or _default_supplier_code()
     per_role = {}
     for role in ROLES:
         probes = _probe_role(
-            role, supplier_code if role == "supplier" else None, baseline
+            role, external_code if role == "supplier" else None, baseline
         )
         match = next(p for p in probes if p.table == table)
         per_role[role] = match.model_dump()

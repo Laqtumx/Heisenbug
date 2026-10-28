@@ -221,9 +221,13 @@ class ReviewDecisionRequest(BaseModel):
 class ReviewBulkRequest(BaseModel):
     decision: Literal["approve", "reject"]
     entity: str | None = None
+    rule_id: str | None = None
     severity: Severity | None = None
     note: str = Field(default="", max_length=2000)
     limit: int = Field(default=5000, ge=1, le=50000)
+    # When present, the decision is bounded to these review items. This is how
+    # the review screen approves a ticked selection rather than a whole filter.
+    review_ids: list[uuid.UUID] | None = None
 
 
 class ReviewDecisionOut(BaseModel):
@@ -375,6 +379,9 @@ class RlsMatrixOut(BaseModel):
     roles: dict[str, list[RlsProbeOut]]
     summary: dict[str, list[str]]
     enforced_by: str
+    # The supplier the external probe ran as, so the supplier column can be read
+    # as "this supplier sees its own rows" rather than a bare zero.
+    supplier_code: str | None = None
 
 
 TokenResponse.model_rebuild()

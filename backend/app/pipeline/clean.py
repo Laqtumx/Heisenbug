@@ -29,6 +29,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from collections.abc import Sequence
 from typing import Any
 
 import pandas as pd
@@ -187,13 +188,18 @@ def _fix_uom_variant(
 
 
 def _fix_archive(
-    frame: pd.DataFrame, params: dict, ctx: RuleContext
+    frame: pd.DataFrame, spec: EntitySpec, params: dict, ctx: RuleContext
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     """Drop stale master records from the load set.
 
     Archiving is a filter, not a rewrite. The record is preserved in Mongo and
     counted in the reconciliation report; it simply does not travel to the new
     ERP, which is the whole point of "move the data, not the mistakes".
+
+    A record a child still points at is kept regardless of its date. Archiving
+    a customer that invoices reference does not remove a stale record, it
+    manufactures an orphan, so the staleness cutoff is applied only to parents
+    nothing depends on.
     """
     column = params.get("column", "last_activity_date")
     years = int(params.get("years", settings.archive_after_years))
@@ -203,6 +209,12 @@ def _fix_archive(
     parsed = parse_dates(frame[column])
     cutoff = pd.Timestamp(ctx.reference_date) - pd.DateOffset(years=years)
     stale = parsed.notna() & (parsed < cutoff)
+
+    protected = ctx.protected_keys.get((spec.name, spec.primary_key), set())
+    if protected and spec.primary_key in frame.columns:
+        keys = frame[spec.primary_key].astype(str).str.strip()
+        stale = stale & ~keys.isin(protected)
+
     if not stale.any():
         return frame, []
 
@@ -218,6 +230,41 @@ def _fix_archive(
             "archived": True,
         }
     ]
+
+
+def _referenced_parent_keys(
+    frames: dict[str, pd.DataFrame], ruleset
+) -> dict[tuple[str, str], set[str]]:
+    """Parent keys that some child entity still points at.
+
+    Read from the configured referential rules rather than a hardcoded list, so
+    a new parent/child relationship declared in ``rules.json`` is protected
+    without a code change. The set is built from the frames as they arrive at
+    the clean stage, which is what the archiving decision has to respect.
+    """
+    protected: dict[tuple[str, str], set[str]] = {}
+    for rule in ruleset.rules:
+        if rule.rule_type != "referential_orphan":
+            continue
+        parent = rule.params.get("parent_entity")
+        parent_column = rule.params.get("parent_column")
+        column = rule.params.get("column")
+        if not parent or not parent_column or not column:
+            continue
+        child_frames = [
+            frames[entity]
+            for entity in rule.entities
+            if entity != "$all" and entity in frames
+        ]
+        keys: set[str] = set()
+        for child in child_frames:
+            if child.empty or column not in child.columns:
+                continue
+            values = child[column].astype(str).str.strip()
+            keys.update(values[~values.isin(NULL_TOKENS)])
+        if keys:
+            protected[(parent, parent_column)] = keys
+    return protected
 
 
 def _merge_duplicates(
@@ -353,7 +400,7 @@ def _apply_auto_fixes(
     if rule.rule_type == "duplicate_exact":
         return fixer(frame, spec, rule.params)
     if rule.rule_type == "stale_record":
-        return fixer(frame, rule.params, ctx)
+        return fixer(frame, spec, rule.params, ctx)
     return fixer(frame, rule.params)
 
 
@@ -371,6 +418,7 @@ def run_clean(
 
     ruleset = load_ruleset()
     ctx = RuleContext(frames=frames, specs=ENTITIES_BY_NAME)
+    ctx.protected_keys = _referenced_parent_keys(frames, ruleset)
     summary = CleanSummary(batch_id=batch_id)
     summary.rows_in = int(sum(len(f) for f in frames.values()))
 
@@ -495,6 +543,13 @@ def run_clean(
     summary.duration_ms = int((time.perf_counter() - started) * 1000)
     summary.findings_open = _count_open_findings(session, batch_id)
 
+    # Score the cleaned frames on the same scale validation used, so the batch
+    # can report the before-and-after the dashboard shows. Measured rather than
+    # assumed: if cleaning did not lift the score, this reports that.
+    from app.rules.engine import score_frames
+
+    health_after = score_frames(cleaned)
+
     _persist_clean_frames(batch_id, cleaned)
 
     session.execute(
@@ -503,11 +558,17 @@ def run_clean(
             update public.migration_batches
                set status = 'cleaned',
                    record_count_in = :rows_in,
-                   record_count_archived = :archived
+                   record_count_archived = :archived,
+                   health_score_after = :score
              where id = cast(:b as uuid)
             """
         ),
-        {"b": batch_id, "rows_in": summary.rows_in, "archived": summary.archived},
+        {
+            "b": batch_id,
+            "rows_in": summary.rows_in,
+            "archived": summary.archived,
+            "score": health_after,
+        },
     )
 
     finish_stage(session, batch_id, "clean", summary=summary.to_dict())
@@ -1014,8 +1075,14 @@ def bulk_decide_review_items(
     note: str = "",
     request_id: str | None = None,
     limit: int = 5000,
+    review_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """Decide many review items at once, filtered by entity, rule or severity.
+    """Decide many review items at once.
+
+    Filtered by entity, rule or severity, or narrowed to an explicit list of
+    ids. The id form is what the review screen uses, so a decision covers
+    exactly the rows the reviewer ticked rather than everything matching a
+    filter they may have since changed.
 
     Bulk approval is how the demo clears a large queue, so it is deliberately
     narrow: it only ever touches items still pending, and it reports exactly
@@ -1029,6 +1096,22 @@ def bulk_decide_review_items(
     if severity:
         filters.append("severity = cast(:severity as severity)")
         params["severity"] = severity
+    if rule_id:
+        # review_queue has no rule_id column; the rule lives on the finding the
+        # item was raised from, so resolve through finding_id.
+        filters.append(
+            "finding_id in ("
+            " select id from public.validation_findings"
+            "  where batch_id = cast(:b as uuid) and rule_id = :rule_id)"
+        )
+        params["rule_id"] = rule_id
+    if review_ids is not None:
+        if not review_ids:
+            # An explicit empty selection means nothing to do. Returning early
+            # is safer than dropping the filter and deciding the whole queue.
+            return {"requested": 0, "decided": 0, "failed": [], "decision": decision}
+        filters.append("id = any(cast(:review_ids as uuid[]))")
+        params["review_ids"] = list(review_ids)
 
     where = " and ".join(filters)
     rows = session.execute(

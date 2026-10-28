@@ -79,7 +79,7 @@ def list_review(
         where.append("entity = :entity")
         params["entity"] = entity
     if severity:
-        where.append("severity = cast(:severity as finding_severity)")
+        where.append("severity = cast(:severity as severity)")
         params["severity"] = severity
     if review_status and review_status != "all":
         where.append("status = :review_status")
@@ -229,6 +229,8 @@ def bulk(
         severity=payload.severity,
         note=payload.note,
         limit=payload.limit,
+        rule_id=payload.rule_id,
+        review_ids=[str(rid) for rid in payload.review_ids] if payload.review_ids is not None else None,
     )
     return ReviewBulkOut(
         requested=result["requested"],

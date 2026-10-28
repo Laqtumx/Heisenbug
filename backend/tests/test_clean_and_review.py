@@ -204,6 +204,49 @@ def test_archived_records_are_removed_from_the_load_set(cleaned) -> None:
     assert summary.rows_out == summary.rows_in - summary.archived - summary.duplicates_merged
 
 
+def test_archiving_never_orphans_a_child(cleaned) -> None:
+    """A stale parent a child still points at must stay.
+
+    Archiving is meant to drop records nobody needs. Dropping a customer that
+    invoices still reference does not clean anything: it turns one stale master
+    row into hundreds of orphan findings, which is the opposite of the promise.
+    """
+    raw_customers = cleaned["raw"]["customers"]
+    clean_customers = cleaned["cleaned"]["customers"]
+    raw_keys = set(raw_customers["customer_code"].astype(str).str.strip())
+    kept_keys = set(clean_customers["customer_code"].astype(str).str.strip())
+
+    referenced = set(cleaned["cleaned"]["invoices"]["customer_code"].astype(str).str.strip())
+    dropped_but_referenced = (raw_keys - kept_keys) & referenced
+    assert dropped_but_referenced == set()
+
+
+def test_cleaning_does_not_create_new_orphans(cleaned) -> None:
+    """Cleaning must not raise the orphan count it is supposed to reduce."""
+
+    def orphan_count(frames: dict) -> int:
+        parents = set(frames["customers"]["customer_code"].astype(str).str.strip())
+        refs = frames["invoices"]["customer_code"].astype(str).str.strip()
+        return int((~refs.isin(parents)).sum())
+
+    assert orphan_count(cleaned["cleaned"]) <= orphan_count(cleaned["raw"])
+
+
+def test_health_score_after_is_persisted(cleaned) -> None:
+    """The dashboard reads this column, so the clean stage has to write it."""
+    with service_session() as session:
+        row = session.execute(
+            text(
+                "select health_score_before, health_score_after "
+                "from public.migration_batches where id = cast(:b as uuid)"
+            ),
+            {"b": cleaned["batch_id"]},
+        ).mappings().first()
+    assert row["health_score_before"] is not None
+    assert row["health_score_after"] is not None
+    assert row["health_score_after"] > row["health_score_before"]
+
+
 def test_merge_keeps_the_more_complete_record(cleaned) -> None:
     """A merge must not lose a field the loser had filled in."""
     assert cleaned["summary"].duplicates_merged > 0
@@ -446,6 +489,133 @@ def test_bulk_reject_only_touches_pending_items(cleaned) -> None:
     assert still_pending_other > 0
     # Earlier decisions were not overwritten.
     assert decisions_preserved >= already
+
+
+def test_bulk_by_ids_decides_only_the_listed_items(cleaned) -> None:
+    """A ticked selection decides exactly those rows, and nothing else.
+
+    This is the behaviour the review screen relies on: the reviewer picks rows,
+    and the API must not widen that to the whole queue.
+    """
+    batch_id = cleaned["batch_id"]
+    with service_session() as session:
+        chosen = session.execute(
+            text(
+                "select id from public.review_queue "
+                "where batch_id = cast(:b as uuid) and status = 'pending' "
+                "order by created_at limit 3"
+            ),
+            {"b": batch_id},
+        ).scalars().all()
+        assert len(chosen) == 3
+
+        result = bulk_decide_review_items(
+            session,
+            batch_id=batch_id,
+            decision="approve",
+            user=USER,
+            review_ids=[str(rid) for rid in chosen],
+        )
+
+        decided = session.execute(
+            text(
+                "select count(*) from public.review_queue "
+                "where id = any(cast(:ids as uuid[])) and status = 'approved'"
+            ),
+            {"ids": [str(rid) for rid in chosen]},
+        ).scalar_one()
+        untouched = session.execute(
+            text(
+                "select count(*) from public.review_queue "
+                "where batch_id = cast(:b as uuid) and status = 'pending'"
+            ),
+            {"b": batch_id},
+        ).scalar_one()
+
+    assert result["requested"] == 3
+    assert result["decided"] == 3
+    assert decided == 3
+    # The rest of the queue is still waiting for a human.
+    assert untouched > 0
+
+
+def test_bulk_with_an_empty_id_list_decides_nothing(cleaned) -> None:
+    """An empty selection must not fall back to deciding the whole queue."""
+    batch_id = cleaned["batch_id"]
+    with service_session() as session:
+        before = session.execute(
+            text(
+                "select count(*) from public.review_queue "
+                "where batch_id = cast(:b as uuid) and status = 'pending'"
+            ),
+            {"b": batch_id},
+        ).scalar_one()
+        result = bulk_decide_review_items(
+            session,
+            batch_id=batch_id,
+            decision="approve",
+            user=USER,
+            review_ids=[],
+        )
+        after = session.execute(
+            text(
+                "select count(*) from public.review_queue "
+                "where batch_id = cast(:b as uuid) and status = 'pending'"
+            ),
+            {"b": batch_id},
+        ).scalar_one()
+
+    assert result == {"requested": 0, "decided": 0, "failed": [], "decision": "approve"}
+    assert after == before
+
+
+def test_bulk_by_rule_id_decides_only_that_rule(cleaned) -> None:
+    """Filtering by rule resolves through the linked finding, not the queue.
+
+    review_queue has no rule_id column, so the filter has to reach the finding.
+    A missing join is a 500 rather than a wrong answer, which is easy to ship
+    without noticing, so the test pins the behaviour.
+    """
+    batch_id = cleaned["batch_id"]
+    with service_session() as session:
+        rule_id = session.execute(
+            text(
+                """
+                select f.rule_id
+                  from public.review_queue q
+                  join public.validation_findings f on f.id = q.finding_id
+                 where q.batch_id = cast(:b as uuid) and q.status = 'pending'
+                 group by f.rule_id
+                 order by count(*) desc
+                 limit 1
+                """
+            ),
+            {"b": batch_id},
+        ).scalar_one()
+
+        result = bulk_decide_review_items(
+            session, batch_id=batch_id, decision="approve", user=USER, rule_id=rule_id
+        )
+
+        other_pending = session.execute(
+            text(
+                """
+                select count(*)
+                  from public.review_queue q
+                  join public.validation_findings f on f.id = q.finding_id
+                 where q.batch_id = cast(:b as uuid)
+                   and q.status = 'pending'
+                   and f.rule_id <> :rule_id
+                """
+            ),
+            {"b": batch_id, "rule_id": rule_id},
+        ).scalar_one()
+
+    assert result["failed"] == []
+    assert result["decided"] == result["requested"]
+    assert result["requested"] > 0
+    # A different rule is left for a human.
+    assert other_pending > 0
 
 
 def test_cleaned_frames_round_trip_through_mongo(cleaned) -> None:

@@ -158,6 +158,59 @@ def _persist_findings(
     )
 
 
+def score_frames(
+    frames: dict[str, pd.DataFrame], *, reference_date=None
+) -> float:
+    """The health score a set of frames would earn, without writing anything.
+
+    The clean stage calls this on the cleaned frames so the batch can report a
+    before-and-after score. It runs the same rules through the same scorer as
+    validation, so "before" and "after" are measured on one scale.
+    """
+    ruleset = load_ruleset()
+    ctx = RuleContext(frames=frames, specs=ENTITIES_BY_NAME, reference_date=reference_date)
+
+    total_records = int(sum(len(f) for f in frames.values()))
+    by_severity: Counter[str] = Counter()
+    affected_records: set[str] = set()
+    worst_by_record: dict[str, str] = {}
+
+    for entity, frame in frames.items():
+        spec = ENTITIES_BY_NAME.get(entity)
+        if spec is None:
+            continue
+        for base_rule in ruleset.for_entity(entity):
+            implementation = RULES.get(base_rule.rule_type)
+            if implementation is None:
+                continue
+            rule = expand_for_entity(base_rule, entity)
+            if not rule.params:
+                continue
+            try:
+                findings = implementation(frame, spec, rule.params, ctx)
+            except Exception:
+                logger.exception("scoring rule %s failed on %s", rule.rule_id, entity)
+                continue
+            for finding in findings:
+                severity = finding.get("severity") or rule.severity
+                by_severity[severity] += 1
+                if finding.get("record_id"):
+                    key = f"{entity}:{finding['record_id']}"
+                    affected_records.add(key)
+                    previous = worst_by_record.get(key)
+                    if previous is None or SEVERITY_RANK.get(severity, 0) > SEVERITY_RANK.get(
+                        previous, 0
+                    ):
+                        worst_by_record[key] = severity
+
+    return compute_health_score(
+        total_records=total_records,
+        findings_by_severity=dict(by_severity),
+        affected_records=len(affected_records),
+        records_by_worst_severity=dict(Counter(worst_by_record.values())),
+    )
+
+
 def run_validation(
     session: Session,
     *,
@@ -280,7 +333,8 @@ def run_validation(
         text(
             """
             update public.migration_batches
-               set status = 'validated', health_score_before = :score
+               set status = 'validated',
+                   health_score_before = coalesce(health_score_before, :score)
              where id = cast(:b as uuid)
             """
         ),

@@ -78,6 +78,27 @@ cd backend && .venv/bin/python -m pytest tests/test_detection_rate.py -q
 
 Current result on the full 50k dataset: 100% recall, 99.8% precision.
 
+## Rules for changing the health score
+
+The score is the product's headline number, so it has to mean one thing
+everywhere it is read.
+
+`health_score_before` is the score on arrival and is set once. Validation
+writes it only when it is null, so re-validating cleaned frames cannot move the
+baseline. Ingest clears both scores when new data lands, which re-baselines the
+batch.
+
+`health_score_after` is written by the clean stage from the cleaned frames,
+using `score_frames` so both numbers sit on the same scale. Anything that
+reports a current score (`/health`, `/findings/summary`, the dashboards) reads
+the after score and falls back to the before score only when cleaning has not
+run yet.
+
+Archiving must not create orphans. `_referenced_parent_keys` reads the
+referential rules to find parent keys that children still point at, and
+`_fix_archive` skips those. A stale customer an invoice still references is
+kept; archiving it would turn one stale record into a pile of blockers.
+
 ## Testing notes
 
 Tests run against the real databases, not mocks. Every fixture that inserts
