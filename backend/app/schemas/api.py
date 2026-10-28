@@ -15,7 +15,27 @@ import uuid
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from typing import Annotated
+
+from email_validator import EmailNotValidError, validate_email
+
+
+def _validate_email(value: str) -> str:
+    """Validate an email address, allowing internal and reserved domains.
+
+    ``test_environment=True`` relaxes the deliverability rules that reject
+    special-use domains such as ``.test`` and ``.internal``. The syntax is still
+    checked, so a malformed address is still refused. Without this the demo
+    accounts, which use a reserved domain on purpose, could not sign in.
+    """
+    try:
+        return validate_email(value, check_deliverability=False, test_environment=True).normalized
+    except EmailNotValidError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+Email = Annotated[str, AfterValidator(_validate_email)]
 
 Severity = Literal["blocker", "warn", "info"]
 Role = Literal[
@@ -37,7 +57,7 @@ class ORMModel(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    email: Email
     password: str = Field(min_length=1, max_length=256)
 
 
@@ -262,7 +282,7 @@ class RollbackOut(BaseModel):
 
 
 class AuditEntryOut(BaseModel):
-    id: uuid.UUID
+    id: int
     action: str
     actor_email: str
     actor_role: str
@@ -273,7 +293,7 @@ class AuditEntryOut(BaseModel):
     before: dict[str, Any] | None = None
     after: dict[str, Any] | None = None
     request_id: str | None = None
-    created_at: datetime
+    occurred_at: datetime
 
 
 class AuditPage(BaseModel):

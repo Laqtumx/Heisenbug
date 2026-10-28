@@ -327,9 +327,39 @@ def findings_summary(session: Session, batch_id: str) -> dict[str, Any]:
         by_category[row["rule_category"]] += row["count"]
         by_entity[row["entity"]] += row["count"]
 
+    # Counted per rule and per status, which the dashboard charts. Grouping in
+    # the database rather than fetching every finding keeps this cheap on a
+    # batch with tens of thousands of them.
+    by_rule = dict(
+        session.execute(
+            text(
+                """
+                select rule_id, count(*) from public.validation_findings
+                 where batch_id = cast(:b as uuid)
+                 group by rule_id order by count(*) desc
+                """
+            ),
+            {"b": batch_id},
+        ).all()
+    )
+    by_status = dict(
+        session.execute(
+            text(
+                """
+                select status::text, count(*) from public.validation_findings
+                 where batch_id = cast(:b as uuid)
+                 group by status
+                """
+            ),
+            {"b": batch_id},
+        ).all()
+    )
+
     return {
         "by_severity": dict(by_severity),
         "by_category": dict(by_category),
         "by_entity": dict(by_entity),
+        "by_rule": {str(k): int(v) for k, v in by_rule.items()},
+        "by_status": {str(k): int(v) for k, v in by_status.items()},
         "total": int(sum(by_severity.values())),
     }

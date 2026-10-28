@@ -121,3 +121,13 @@ def mask_phone(value: str | None, *, visible: bool = False) -> str | None:
         return value
     text = str(value)
     return MASK + text[-2:] if len(text) > 2 else MASK
+
+
+def encryption_ready() -> bool:
+    """Whether an explicit key is configured.
+
+    False does not mean encryption is off: a development key is derived so a
+    fresh clone runs. It means the key is not the operator's own, which matters
+    before real data is stored.
+    """
+    return bool(settings.field_encryption_key.strip())
