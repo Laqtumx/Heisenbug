@@ -125,31 +125,34 @@ class ReconciliationReport:
 
 
 def held_back_records(session: Session, batch_id: str) -> dict[str, set[str]]:
-    """Records per entity that must not be loaded yet.
+    """Records per entity that must not be loaded.
 
-    A record carrying an unresolved blocker has a known defect that would make
-    it wrong in the new ERP — a missing mandatory field, an orphaned foreign
-    key, an unbalanced ledger line. Loading it would carry the mistake across,
-    which is the one thing this platform exists to prevent. It is held back
-    until a reviewer resolves it, and the reconciliation report counts it.
+    Two kinds of record are excluded. A record with an unresolved blocker has a
+    known defect that would make it wrong in the new ERP — a missing mandatory
+    field, an orphaned foreign key, an unbalanced ledger line. A record a
+    reviewer rejected is a human saying "do not migrate this". Both stay behind,
+    and the reconciliation report counts them separately.
 
-    Only 'open' and 'pending_review' block. A record a reviewer approved is
-    loadable; a record they rejected is already out of the cleaned set.
+    A record a reviewer *approved* is loadable, so 'approved' does not block.
     """
     rows = session.execute(
         text(
             """
-            select entity, record_id
+            select entity, record_id,
+                   bool_or(status = 'rejected') as rejected
               from public.validation_findings
              where batch_id = cast(:b as uuid)
-               and severity = 'blocker'
-               and status in ('open', 'pending_review')
+               and (
+                 status = 'rejected'
+                 or (severity = 'blocker' and status in ('open', 'pending_review'))
+               )
+             group by entity, record_id
             """
         ),
         {"b": batch_id},
     ).all()
     held: dict[str, set[str]] = {}
-    for entity, record_id in rows:
+    for entity, record_id, _rejected in rows:
         held.setdefault(str(entity), set()).add(str(record_id))
     return held
 
@@ -172,6 +175,10 @@ def loadable_frames(
         if not blocked or "record_id" not in frame.columns:
             loadable[entity] = frame
             continue
+        # Counted from the frame, not from the findings. The cleaner archives and
+        # merges records away, and a finding can outlive the record it named; a
+        # count taken from the findings would exceed the records that exist and
+        # the reconciliation would not add up.
         keep = ~frame["record_id"].astype(str).isin(blocked)
         loadable[entity] = frame.loc[keep].reset_index(drop=True)
         held_counts[entity] = int((~keep).sum())
@@ -262,7 +269,7 @@ def run_dry_run(
         recon.totals_out = row_totals(spec, staged)
         report.entities[spec.name] = recon
 
-    report.counts = _reconciliation_counts(session, batch_id, frames, counts)
+    report.counts = _reconciliation_counts(session, batch_id, frames, counts, held)
     report.health_score = _health_score(session, batch_id)
     report.duration_ms = int((time.perf_counter() - started) * 1000)
 
@@ -346,7 +353,7 @@ def run_load(
         recon.totals_out = row_totals(spec, loaded)
         report.entities[spec.name] = recon
 
-    report.counts = _reconciliation_counts(session, batch_id, frames, counts)
+    report.counts = _reconciliation_counts(session, batch_id, frames, counts, held)
     report.health_score = _health_score(session, batch_id)
     report.duration_ms = int((time.perf_counter() - started) * 1000)
 
@@ -473,6 +480,7 @@ def _reconciliation_counts(
     batch_id: str,
     frames: dict[str, pd.DataFrame],
     loaded: dict[str, int],
+    held: dict[str, int] | None = None,
 ) -> dict[str, int]:
     """The headline numbers for the reconciliation view.
 
@@ -497,21 +505,7 @@ def _reconciliation_counts(
     )
     loaded_total = sum(loaded.values())
 
-    # Held back means "has an unresolved blocker", counted from the findings
-    # rather than from the review queue: a blocker is why a record cannot load,
-    # and it may not have a queue item if a reviewer has not opened it yet.
-    held = session.execute(
-        text(
-            """
-            select count(distinct (entity, record_id))
-              from public.validation_findings
-             where batch_id = cast(:b as uuid)
-               and severity = 'blocker'
-               and status in ('open', 'pending_review')
-            """
-        ),
-        {"b": batch_id},
-    ).scalar_one()
+    held_total = sum(held.values()) if held else 0
     rejected = session.execute(
         text(
             """
@@ -538,11 +532,11 @@ def _reconciliation_counts(
         {"b": batch_id},
     ).scalar_one()
 
-    accounted = int(loaded_total + held + rejected + merged + int(archived or 0))
+    accounted = int(loaded_total + held_total + rejected + merged + int(archived or 0))
     return {
         "records_in": int(rows_in),
         "records_loaded": int(loaded_total),
-        "records_held_back": int(held),
+        "records_held_back": int(held_total),
         "records_rejected": int(rejected),
         "records_archived": int(archived or 0),
         "records_merged": int(merged),
