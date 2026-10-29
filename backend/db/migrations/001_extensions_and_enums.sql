@@ -18,7 +18,25 @@ end
 $roles$;
 
 -- service_role is the trusted backend path and bypasses RLS, mirroring Supabase.
-alter role service_role bypassrls;
+-- Supabase grants this attribute at creation. On a plain Postgres instance only
+-- a superuser, or a role that already holds BYPASSRLS, may set it. Hosted
+-- Postgres (Render, RDS) gives the app a role with CREATEROLE but not BYPASSRLS,
+-- so skip the grant there instead of failing the whole migration. Nothing in the
+-- application connects as service_role.
+do $svc$
+begin
+  if not exists (
+    select 1 from pg_roles where rolname = 'service_role' and rolbypassrls
+  ) then
+    begin
+      execute 'alter role service_role bypassrls';
+    exception when insufficient_privilege then
+      raise notice
+        'cannot set BYPASSRLS on service_role with the current role; skipping';
+    end;
+  end if;
+end
+$svc$;
 
 -- --------------------------------------------------------------------- enums --
 do $enums$
