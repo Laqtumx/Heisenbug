@@ -199,6 +199,20 @@ make test-fast   # everything except the slow pipeline tests
 Tests run against real Postgres and Mongo, not mocks. Start the databases with
 `make db-up` first.
 
+## Deploy
+
+See `docs/DEPLOY.md` for the full runbook. In short: Postgres on Supabase, Mongo
+on Atlas, the API as a container on Render, the frontend on Vercel. Set
+`NEXT_PUBLIC_API_BASE` on Vercel before the first build, because the API proxy
+rewrite is baked in at build time.
+
+The API image builds and runs as-is:
+
+```bash
+docker build -f backend/Dockerfile -t cleanslate-api .
+docker run --rm -p 8000:8000 --env-file .env cleanslate-api
+```
+
 ## Configuration
 
 All settings have working defaults for local development. See `.env.example`.
@@ -221,9 +235,8 @@ Not built yet:
 - The verify and sign-off stages. Reconciliation and the health score are
   computed by the load stage and shown on the dashboards, but there is no
   separate verify endpoint or go-live checklist.
-- Postman collection, the architecture and flow diagrams as separate files, and
-  the three-minute demo script. The diagrams in this README are the current
-  source.
+- Postman collection, and the three-minute demo script. The diagrams in this
+  README are the current source. `docs/DEPLOY.md` is the deploy runbook.
 
 ## Notes
 

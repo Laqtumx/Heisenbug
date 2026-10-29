@@ -1,0 +1,39 @@
+# Render blueprint for the CleanSlate API.
+#
+# The frontend goes to Vercel; only the API and its dependencies live here.
+# Postgres and Mongo are external (Supabase and MongoDB Atlas), because the free
+# Render disk is not a database and the data must outlive a redeploy.
+#
+# To use: push this repo, then in Render choose New > Blueprint and point it at
+# the repo. Render reads this file and prompts for the values marked sync:false.
+services:
+  - type: web
+    name: cleanslate-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      # Set these in the Render dashboard. Never commit real values.
+      - key: DATABASE_URL
+        sync: false
+      - key: MONGO_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: FIELD_ENCRYPTION_KEY
+        sync: false
+      - key: BLIND_INDEX_KEY
+        sync: false
+      # Not "local", so the local-only SQL shims in backend/db/local are skipped
+      # and the app expects a real Supabase contract.
+      - key: ENVIRONMENT
+        value: production
+      # The Vercel URL. Set after the first frontend deploy, then redeploy.
+      - key: CORS_ORIGINS
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
+      - key: RATE_LIMIT_DEFAULT
+        value: 120/minute
